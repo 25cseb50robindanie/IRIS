@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / Electron / Frontend
+node_modules/
+dist/
+dist-electron/
+release/
+.npm
+*.log
+
+# Geospatial and Data files
+*.tif
+*.tiff
+*.jp2
+*.tar
+*.zip
+*.nc
+*.hdf
+*.SAFE
+
+# Data Directories
+**/data/uploads/*
+!**/data/uploads/.gitkeep
+**/data/cogs/*
+!**/data/cogs/.gitkeep
+**/data/staging/*
+!**/data/staging/.gitkeep
+**/data/*.db
+**/data/*.sqlite3
+*.db
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# OS and Editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
