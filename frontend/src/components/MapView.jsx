@@ -1,14 +1,17 @@
-import React, { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
+import React, { useEffect, useRef, useState, useImperativeHandle, forwardRef } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 const MapView = forwardRef(function MapView(
-  { currentScene, onMouseMove, onMapReady },
+  { currentScene, selectedResult, onMouseMove, onMapReady },
   ref
 ) {
   const mapContainer = useRef(null);
   const mapInstance = useRef(null);
   const activeBounds = useRef(null);
+  // The scene layer can only be added once the map has loaded; a scene resumed from the catalog
+  // on startup may arrive before that, so the layer effect must re-run when the map becomes ready.
+  const [mapReady, setMapReady] = useState(false);
 
   // Expose zoomIn, zoomOut, fitBounds via ref
   useImperativeHandle(ref, () => ({
@@ -18,12 +21,26 @@ const MapView = forwardRef(function MapView(
     zoomOut: () => {
       if (mapInstance.current) mapInstance.current.zoomOut({ duration: 300 });
     },
-    fitBounds: () => {
-      if (mapInstance.current && activeBounds.current) {
-        mapInstance.current.fitBounds(activeBounds.current, {
-          padding: 40,
+    fitBounds: (customBounds) => {
+      const target = customBounds || activeBounds.current;
+      if (mapInstance.current && target) {
+        mapInstance.current.fitBounds(target, {
+          padding: 50,
           duration: 1000,
-          maxZoom: 16,
+          maxZoom: 17,
+        });
+      }
+    },
+    flyToBounds: (boundsWgs84) => {
+      if (mapInstance.current && boundsWgs84 && boundsWgs84.length === 4) {
+        const fitTarget = [
+          [boundsWgs84[0], boundsWgs84[1]],
+          [boundsWgs84[2], boundsWgs84[3]],
+        ];
+        mapInstance.current.fitBounds(fitTarget, {
+          padding: 80,
+          duration: 1200,
+          maxZoom: 17,
         });
       }
     },
@@ -55,7 +72,41 @@ const MapView = forwardRef(function MapView(
 
     map.on("load", () => {
       mapInstance.current = map;
+
+      // Add GeoJSON source for selected crop highlight box
+      if (!map.getSource("crop-highlight-source")) {
+        map.addSource("crop-highlight-source", {
+          type: "geojson",
+          data: {
+            type: "FeatureCollection",
+            features: [],
+          },
+        });
+
+        map.addLayer({
+          id: "crop-highlight-fill",
+          type: "fill",
+          source: "crop-highlight-source",
+          paint: {
+            "fill-color": "#10b981",
+            "fill-opacity": 0.15,
+          },
+        });
+
+        map.addLayer({
+          id: "crop-highlight-line",
+          type: "line",
+          source: "crop-highlight-source",
+          paint: {
+            "line-color": "#34d399",
+            "line-width": 2.5,
+            "line-dasharray": [2, 1],
+          },
+        });
+      }
+
       if (onMapReady) onMapReady(map);
+      setMapReady(true);
     });
 
     map.on("mousemove", (e) => {
@@ -72,13 +123,70 @@ const MapView = forwardRef(function MapView(
     return () => {
       map.remove();
       mapInstance.current = null;
+      setMapReady(false);
     };
   }, []);
+
+  // Update highlight box when selectedResult changes
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map || !map.isStyleLoaded()) return;
+
+    const highlightSource = map.getSource("crop-highlight-source");
+    if (!highlightSource) return;
+
+    if (selectedResult && selectedResult.bounds && selectedResult.bounds.length === 4) {
+      const [minx, miny, maxx, maxy] = selectedResult.bounds;
+      const polygonGeoJSON = {
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            geometry: {
+              type: "Polygon",
+              coordinates: [
+                [
+                  [minx, miny],
+                  [maxx, miny],
+                  [maxx, maxy],
+                  [minx, maxy],
+                  [minx, miny],
+                ],
+              ],
+            },
+            properties: {
+              tile_id: selectedResult.tile_id,
+              score: selectedResult.score,
+            },
+          },
+        ],
+      };
+      highlightSource.setData(polygonGeoJSON);
+
+      // Fly map to crop bounds
+      map.fitBounds(
+        [
+          [minx, miny],
+          [maxx, maxy],
+        ],
+        {
+          padding: 80,
+          duration: 1200,
+          maxZoom: 17,
+        }
+      );
+    } else {
+      highlightSource.setData({
+        type: "FeatureCollection",
+        features: [],
+      });
+    }
+  }, [selectedResult]);
 
   // Update raster layer when currentScene changes
   useEffect(() => {
     const map = mapInstance.current;
-    if (!map || !currentScene || (!currentScene.cog_path && !currentScene.cog_url)) return;
+    if (!map || !mapReady || !currentScene || (!currentScene.cog_path && !currentScene.cog_url)) return;
 
     const targetUrl = currentScene.cog_url || currentScene.cog_path;
     const sourceId = `cog-source-${currentScene.scene_id}`;
@@ -111,16 +219,21 @@ const MapView = forwardRef(function MapView(
           tileSize: 256,
         });
 
-        // Add raster layer with bilinear resampling
-        map.addLayer({
-          id: layerId,
-          type: "raster",
-          source: sourceId,
-          paint: {
-            "raster-resampling": "linear",
-            "raster-fade-duration": 200,
+        // Add raster layer beneath any vector highlight overlays
+        const beforeLayerId = map.getLayer("crop-highlight-fill") ? "crop-highlight-fill" : undefined;
+
+        map.addLayer(
+          {
+            id: layerId,
+            type: "raster",
+            source: sourceId,
+            paint: {
+              "raster-resampling": "linear",
+              "raster-fade-duration": 200,
+            },
           },
-        });
+          beforeLayerId
+        );
 
         // Use bounds directly from tilejson or bounds_wgs84
         if (currentScene.bounds_wgs84 && currentScene.bounds_wgs84.length === 4) {
@@ -164,7 +277,7 @@ const MapView = forwardRef(function MapView(
     } else {
       map.once("styledata", loadCog);
     }
-  }, [currentScene]);
+  }, [currentScene, mapReady]);
 
   return (
     <div className="relative w-full h-full flex-1 overflow-hidden bg-[#18181b]">

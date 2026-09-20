@@ -1,9 +1,11 @@
 """IRIS Backend — FastAPI + titiler, localhost only."""
 
+import logging
 import os
 import re
 import sys
 import urllib.parse
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 # On Windows with QGIS/GDAL, ensure DLL directories and PROJ paths are registered
@@ -38,9 +40,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from titiler.application.main import app as titiler_app
 
+from api.catalog_status import router as catalog_router
 from api.ingest import router as ingest_router
+from api.search import router as search_router
+from embedding.index import get_vector_store
 
-app = FastAPI(title="IRIS Backend", version="0.1.0")
+logger = logging.getLogger("iris.main")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Load the persisted FAISS index at startup so a restart resumes with the existing vectors."""
+    store = get_vector_store()
+    logger.info("FAISS index ready: %d vectors from %s", store.total_vectors, store.index_path)
+    yield
+
+
+app = FastAPI(title="IRIS Backend", version="0.1.0", lifespan=lifespan)
 
 # Allow the Electron frontend (localhost) to talk to us
 app.add_middleware(
@@ -115,8 +131,10 @@ class _PrefixedApp:
 # Mount titiler at /tiles — serves COGs as XYZ map tiles on demand
 app.mount("/tiles", _PrefixedApp(titiler_app, "/tiles"))
 
-# Ingestion endpoint
+# Ingestion and Search endpoints
 app.include_router(ingest_router)
+app.include_router(search_router)
+app.include_router(catalog_router)
 
 
 @app.get("/health")

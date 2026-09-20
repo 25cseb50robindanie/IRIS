@@ -42,6 +42,13 @@ release/
 !**/data/staging/.gitkeep
 **/data/*.db
 **/data/*.sqlite3
+**/data/crops/
+**/data/faiss_index.bin*
+
+# Model weights (offline checkpoints are copied in by hand, never committed)
+checkpoints/
+*.pt
+
 *.db
 *.sqlite3
 *.db-journal

@@ -81,6 +81,20 @@ def detect_acquisition_date(file_name: str) -> str:
     return "unknown"
 
 
+def read_raster_bounds(file_path: Path) -> tuple[list[float], list[float]]:
+    """Cheap bounds lookup for an already-converted COG: (native bounds, WGS84 bounds).
+
+    Unlike inspect_raster this does no checksumming, so it is safe to call at app startup.
+    """
+    with rasterio.open(str(file_path)) as src:
+        bounds = [float(src.bounds.left), float(src.bounds.bottom), float(src.bounds.right), float(src.bounds.top)]
+        bounds_wgs84 = bounds
+        if src.crs:
+            w = transform_bounds(src.crs, "EPSG:4326", *src.bounds)
+            bounds_wgs84 = [float(w[0]), float(w[1]), float(w[2]), float(w[3])]
+    return bounds, bounds_wgs84
+
+
 def inspect_raster(file_path: Path) -> SceneMetadata:
     """Perform capability detection on a satellite image file.
     

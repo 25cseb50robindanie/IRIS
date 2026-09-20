@@ -6,6 +6,7 @@ connection AFTER being forked. Never inherit a connection across fork().
 
 import sqlite3
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 DB_PATH = Path("data/iris_catalog.db")
 
@@ -41,7 +42,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             created_at      TEXT DEFAULT (datetime('now'))
         );
 
-        -- Tiles: one row per analysis tile
+        -- Tiles: one row per analysis tile / embedding crop
         CREATE TABLE IF NOT EXISTS tiles (
             tile_id         TEXT PRIMARY KEY,
             scene_id        TEXT NOT NULL REFERENCES scenes(scene_id),
@@ -50,6 +51,10 @@ def init_schema(conn: sqlite3.Connection) -> None:
             min_y           REAL NOT NULL,
             max_x           REAL NOT NULL,
             max_y           REAL NOT NULL,
+            min_lon         REAL,
+            min_lat         REAL,
+            max_lon         REAL,
+            max_lat         REAL,
             cloud_pct       REAL,
             valid_pixel_frac REAL,
             FOREIGN KEY (scene_id) REFERENCES scenes(scene_id)
@@ -61,6 +66,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
             min_x, max_x,
             min_y, max_y
         );
+
+        -- Index on faiss_id for fast vector search joins
+        CREATE INDEX IF NOT EXISTS idx_tiles_faiss_id ON tiles(faiss_id);
 
         -- Job state machine for background processing
         CREATE TABLE IF NOT EXISTS jobs (
@@ -109,4 +117,141 @@ def init_schema(conn: sqlite3.Connection) -> None:
             reviewed_at     TEXT DEFAULT (datetime('now'))
         );
     """)
+
+    # Schema migration for existing databases: check and add missing columns
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(tiles)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+    
+    for col in ["min_lon", "min_lat", "max_lon", "max_lat"]:
+        if col not in existing_cols:
+            cursor.execute(f"ALTER TABLE tiles ADD COLUMN {col} REAL")
+
     conn.commit()
+
+
+def insert_tiles_batch(conn: sqlite3.Connection, tiles_data: List[Dict[str, Any]]) -> None:
+    """Batch insert tile records into SQLite catalog."""
+    if not tiles_data:
+        return
+
+    cursor = conn.cursor()
+    cursor.executemany(
+        """
+        INSERT INTO tiles (
+            tile_id,
+            scene_id,
+            faiss_id,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            min_lon,
+            min_lat,
+            max_lon,
+            max_lat,
+            cloud_pct,
+            valid_pixel_frac
+        ) VALUES (
+            :tile_id,
+            :scene_id,
+            :faiss_id,
+            :min_x,
+            :min_y,
+            :max_x,
+            :max_y,
+            :min_lon,
+            :min_lat,
+            :max_lon,
+            :max_lat,
+            :cloud_pct,
+            :valid_pixel_frac
+        )
+        ON CONFLICT(tile_id) DO UPDATE SET
+            faiss_id=excluded.faiss_id,
+            min_x=excluded.min_x,
+            min_y=excluded.min_y,
+            max_x=excluded.max_x,
+            max_y=excluded.max_y,
+            min_lon=excluded.min_lon,
+            min_lat=excluded.min_lat,
+            max_lon=excluded.max_lon,
+            max_lat=excluded.max_lat,
+            valid_pixel_frac=excluded.valid_pixel_frac;
+        """,
+        tiles_data,
+    )
+
+
+def get_tiles_by_faiss_ids(conn: sqlite3.Connection, faiss_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Lookup tile metadata by a list of faiss_ids."""
+    if not faiss_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in faiss_ids)
+    cursor = conn.cursor()
+    cursor.execute(
+        f"""
+        SELECT 
+            tile_id, scene_id, faiss_id,
+            min_x, min_y, max_x, max_y,
+            min_lon, min_lat, max_lon, max_lat,
+            valid_pixel_frac
+        FROM tiles
+        WHERE faiss_id IN ({placeholders})
+        """,
+        faiss_ids,
+    )
+
+    results: Dict[int, Dict[str, Any]] = {}
+    for row in cursor.fetchall():
+        fid = row[2]
+        results[fid] = {
+            "tile_id": row[0],
+            "scene_id": row[1],
+            "faiss_id": fid,
+            "bounds_native": [row[3], row[4], row[5], row[6]],
+            "bounds_wgs84": [row[7], row[8], row[9], row[10]] if row[7] is not None else [row[3], row[4], row[5], row[6]],
+            "valid_pixel_frac": row[11],
+        }
+    return results
+
+
+def get_scene_tile_count(conn: sqlite3.Connection, scene_id: str) -> Optional[int]:
+    """Number of embedded tiles for a scene, or None if the scene isn't in the catalog."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM scenes WHERE scene_id = ?", (scene_id,))
+    if cursor.fetchone() is None:
+        return None
+    cursor.execute("SELECT COUNT(*) FROM tiles WHERE scene_id = ?", (scene_id,))
+    return int(cursor.fetchone()[0])
+
+
+def list_scenes_newest_first(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """All scenes, most recently imported first, each with its embedded-tile count."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+            s.scene_id, s.sensor, s.acquisition_date, s.crs, s.cog_path,
+            (SELECT COUNT(*) FROM tiles t WHERE t.scene_id = s.scene_id) AS tiles_count
+        FROM scenes s
+        ORDER BY s.created_at DESC, s.rowid DESC
+        """
+    )
+    return [
+        {
+            "scene_id": row[0],
+            "sensor": row[1],
+            "acquisition_date": row[2],
+            "crs": row[3],
+            "cog_path": row[4],
+            "tiles_count": int(row[5]),
+        }
+        for row in cursor.fetchall()
+    ]
+
+
+def count_tiles(conn: sqlite3.Connection) -> int:
+    """Total embedded tile rows across all scenes."""
+    return int(conn.execute("SELECT COUNT(*) FROM tiles").fetchone()[0])
