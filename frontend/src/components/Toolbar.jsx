@@ -1,5 +1,6 @@
 ﻿import React from "react";
 import { FolderOpen, ZoomIn, ZoomOut, Maximize2, Layers, Loader2 } from "lucide-react";
+import SceneMenu from "./SceneMenu";
 
 export default function Toolbar({
   onBrowse,
@@ -8,6 +9,11 @@ export default function Toolbar({
   onZoomOut,
   onFitBounds,
   hasActiveLayer,
+  scenes = [],
+  currentSceneId = null,
+  onSelectScene,
+  onDeleteScene,
+  onOpenScenes,
 }) {
   return (
     <div className="h-9 bg-qgis-bg border-b border-qgis-border px-2 flex items-center justify-between select-none shrink-0">
@@ -26,6 +32,16 @@ export default function Toolbar({
           )}
           <span>{isIngesting ? "Importing..." : "Browse"}</span>
         </button>
+
+        {/* Imported scenes: switch the map to one, or delete it */}
+        <SceneMenu
+          scenes={scenes}
+          currentSceneId={currentSceneId}
+          onSelect={onSelectScene}
+          onDelete={onDeleteScene}
+          onOpen={onOpenScenes}
+          disabled={isIngesting}
+        />
 
         <div className="h-4 w-px bg-qgis-border mx-1" />
 

@@ -11,6 +11,8 @@ from PIL import Image
 from rasterio.windows import Window
 from rasterio.warp import transform_bounds
 
+from ingestion.loader import io_path
+
 logger = logging.getLogger("iris.embedding.crop")
 
 
@@ -92,18 +94,20 @@ def extract_crops(
     min_valid_fraction: float = 0.5,
     output_dir: Path = Path("data/crops"),
     on_progress: Optional[Callable[[int], None]] = None,
+    on_scan: Optional[Callable[[int, int], None]] = None,
 ) -> List[CropInfo]:
     """Extract 224x224 RGB crops from a COG and save valid ones to disk.
 
     Skips crops that have less than min_valid_fraction valid pixels (more than 50% nodata/black).
     on_progress, if given, is called with the running count of crops kept after each one is saved.
+    on_scan, if given, is called with (windows scanned, total windows) after every window, kept or skipped.
     """
     cog_path = Path(cog_path)
     if not cog_path.exists():
         raise FileNotFoundError(f"COG file not found: {cog_path}")
 
     scene_crops_dir = output_dir / scene_id
-    scene_crops_dir.mkdir(parents=True, exist_ok=True)
+    io_path(scene_crops_dir).mkdir(parents=True, exist_ok=True)
 
     crops_info: List[CropInfo] = []
 
@@ -116,10 +120,16 @@ def extract_crops(
         # Determine bands to read
         read_bands = list(range(1, min(src.count, 3) + 1))
 
+        total_windows = max(0, (height // crop_size)) * max(0, (width // crop_size))
+        scanned = 0
+
         # Stride over the raster in steps of crop_size
         for row_off in range(0, height - crop_size + 1, crop_size):
             for col_off in range(0, width - crop_size + 1, crop_size):
                 window = Window(col_off, row_off, crop_size, crop_size)
+                scanned += 1
+                if on_scan is not None:
+                    on_scan(scanned, total_windows)
                 
                 # Read window data (C, H, W)
                 window_data = src.read(read_bands, window=window)
@@ -158,7 +168,7 @@ def extract_crops(
 
                 # Save as PNG
                 img = Image.fromarray(rgb_uint8)
-                img.save(crop_file, format="PNG")
+                img.save(io_path(crop_file), format="PNG")
 
                 crop_info = CropInfo(
                     tile_id=tile_id,

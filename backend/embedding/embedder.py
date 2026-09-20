@@ -9,6 +9,8 @@ import open_clip
 import torch
 from PIL import Image
 
+from ingestion.loader import io_path
+
 logger = logging.getLogger("iris.embedding.embedder")
 
 DEFAULT_CHECKPOINT_PATHS = [
@@ -104,7 +106,7 @@ class RemoteCLIPEmbedder:
 
             for item in batch_items:
                 if isinstance(item, (str, Path)):
-                    img = Image.open(str(item)).convert("RGB")
+                    img = Image.open(str(io_path(Path(item)))).convert("RGB")
                 elif isinstance(item, Image.Image):
                     img = item.convert("RGB")
                 else:

@@ -79,6 +79,38 @@ class FaissVectorStore:
         return idx
 
     @property
+    def lock(self) -> "threading.RLock":
+        """Hold this to make a multi-step read (search, then catalog lookup) or a rebuild atomic."""
+        return self._lock
+
+    def prepare_rebuild(self, keep_ids: List[int]) -> Tuple[faiss.Index, Path]:
+        """Build a new index holding only `keep_ids` (in that order) and write it beside the live one.
+
+        HNSW cannot remove vectors, so deleting a scene means rebuilding from the survivors, which also drops any
+        orphans left by earlier re-imports. Nothing live changes until commit_rebuild.
+        """
+        with self._lock:
+            new = faiss.IndexHNSWFlat(self.dim, self.m_hnsw, faiss.METRIC_INNER_PRODUCT)
+            new.hnsw.efSearch = HNSW_EF_SEARCH
+            if keep_ids:
+                vectors = self.index.reconstruct_batch(np.asarray(keep_ids, dtype=np.int64))
+                new.add(np.ascontiguousarray(vectors, dtype=np.float32))
+            tmp = self.index_path.parent / f"rebuild_{self.index_path.name}"
+            self.index_path.parent.mkdir(parents=True, exist_ok=True)
+            faiss.write_index(new, str(tmp))
+            return new, tmp
+
+    def commit_rebuild(self, new_index: faiss.Index, tmp_path: Path) -> None:
+        """Atomically replace the on-disk index and switch the in-memory one."""
+        with self._lock:
+            os.replace(tmp_path, self.index_path)
+            self.index = new_index
+
+    @staticmethod
+    def discard_rebuild(tmp_path: Path) -> None:
+        tmp_path.unlink(missing_ok=True)
+
+    @property
     def total_vectors(self) -> int:
         """Current number of vectors in index."""
         return self.index.ntotal
@@ -125,6 +157,32 @@ class FaissVectorStore:
                 temp_file.unlink()
             logger.error("Failed to save FAISS index: %s", e)
             raise
+
+    def vectors_for(self, faiss_ids: List[int]) -> np.ndarray:
+        """The stored (N, dim) float32 vectors for these ids."""
+        if not faiss_ids:
+            return np.empty((0, self.dim), dtype=np.float32)
+        with self._lock:
+            return np.ascontiguousarray(
+                self.index.reconstruct_batch(np.asarray(faiss_ids, dtype=np.int64)), dtype=np.float32
+            )
+
+    def search_subset(self, query_vector: np.ndarray, faiss_ids: List[int], top_k: int = 10) -> Tuple[np.ndarray, np.ndarray]:
+        """Exact cosine search restricted to an allowlist of faiss_ids. Returns (scores, ids), best first.
+
+        A scene holds thousands of tiles at most, the regime where scanning the allowlist exactly is both faster
+        and more accurate than filtering an approximate HNSW traversal (architecture.md, metadata-filtered
+        retrieval: brute-force below a few thousand vectors).
+        """
+        if not faiss_ids:
+            return np.empty(0, dtype=np.float32), np.empty(0, dtype=np.int64)
+        query = np.asarray(query_vector, dtype=np.float32).reshape(-1)
+        ids = np.asarray(faiss_ids, dtype=np.int64)
+        scores = self.vectors_for(faiss_ids) @ query
+        k = min(top_k, len(ids))
+        top = np.argpartition(-scores, k - 1)[:k]
+        top = top[np.argsort(-scores[top])]
+        return scores[top], ids[top]
 
     def search(self, query_vector: np.ndarray, top_k: int = 10) -> Tuple[np.ndarray, np.ndarray]:
         """Search nearest vectors by inner product (cosine similarity).

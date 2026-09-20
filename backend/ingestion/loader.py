@@ -37,10 +37,42 @@ class SceneMetadata:
     raw_checksum: str
 
 
+_EXTENDED_PREFIX = "\\\\?\\"  # \\?\
+
+
+def io_path(path: Path) -> Path:
+    """Path form for Python file I/O that is safe beyond Windows' 260-character MAX_PATH.
+
+    Python's open/stat/glob fail on longer paths unless LongPathsEnabled is set system-wide (it usually is not),
+    and a nested Sentinel-2 .SAFE path is already ~170 characters before the analyst's own folders. The
+    extended-length prefix lifts the limit for Python. GDAL handles long paths itself, so hand rasterio the
+    plain form (plain_path). A no-op off Windows.
+    """
+    if os.name != "nt":
+        return path
+    text = str(path)
+    if text.startswith(_EXTENDED_PREFIX):
+        return path
+    # The extended form needs an absolute, normalised path: no "/" separators, no "." or ".." components
+    text = os.path.abspath(text)
+    if text.startswith("\\\\"):  # UNC share: \\server\share -> \\?\UNC\server\share
+        return Path(_EXTENDED_PREFIX + "UNC\\" + text[2:])
+    return Path(_EXTENDED_PREFIX + text)
+
+
+def plain_path(path: Path) -> Path:
+    """Inverse of io_path: the ordinary form of a path, for GDAL, logging and anything shown to the analyst."""
+    text = str(path)
+    if os.name == "nt" and text.startswith(_EXTENDED_PREFIX):
+        rest = text[len(_EXTENDED_PREFIX):]
+        return Path("\\\\" + rest[4:]) if rest.startswith("UNC\\") else Path(rest)
+    return path
+
+
 def compute_sha256(file_path: Path, chunk_size: int = 65536) -> str:
     """Compute SHA-256 checksum of a file in chunks to bound memory usage."""
     hasher = hashlib.sha256()
-    with open(file_path, "rb") as f:
+    with open(io_path(Path(file_path)), "rb") as f:
         while chunk := f.read(chunk_size):
             hasher.update(chunk)
     return hasher.hexdigest()

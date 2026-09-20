@@ -41,8 +41,12 @@ from fastapi.responses import RedirectResponse
 from titiler.application.main import app as titiler_app
 
 from api.catalog_status import router as catalog_router
+from api.change import router as change_router
 from api.ingest import router as ingest_router
+from api.pipeline_status import router as pipeline_router
+from api.scenes import router as scenes_router
 from api.search import router as search_router
+from change_detection.trigger import reconcile_interrupted_jobs
 from embedding.index import get_vector_store
 
 logger = logging.getLogger("iris.main")
@@ -53,6 +57,8 @@ async def lifespan(_app: FastAPI):
     """Load the persisted FAISS index at startup so a restart resumes with the existing vectors."""
     store = get_vector_store()
     logger.info("FAISS index ready: %d vectors from %s", store.total_vectors, store.index_path)
+    # A job left 'processing' by a shutdown is put back in the queue rather than stuck forever
+    reconcile_interrupted_jobs()
     yield
 
 
@@ -135,6 +141,9 @@ app.mount("/tiles", _PrefixedApp(titiler_app, "/tiles"))
 app.include_router(ingest_router)
 app.include_router(search_router)
 app.include_router(catalog_router)
+app.include_router(change_router)
+app.include_router(pipeline_router)
+app.include_router(scenes_router)
 
 
 @app.get("/health")

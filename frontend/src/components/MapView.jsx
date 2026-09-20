@@ -2,6 +2,16 @@ import React, { useEffect, useRef, useState, useImperativeHandle, forwardRef } f
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
+// Remove the scene layer(s) and their tile sources, leaving the highlight overlay in place
+function removeCogLayers(map) {
+  (map.getStyle().layers || []).forEach((l) => {
+    if (l.id.startsWith("cog-layer-") && map.getLayer(l.id)) map.removeLayer(l.id);
+  });
+  Object.keys(map.getStyle().sources || {}).forEach((id) => {
+    if (id.startsWith("cog-source-") && map.getSource(id)) map.removeSource(id);
+  });
+}
+
 const MapView = forwardRef(function MapView(
   { currentScene, selectedResult, onMouseMove, onMapReady },
   ref
@@ -9,6 +19,9 @@ const MapView = forwardRef(function MapView(
   const mapContainer = useRef(null);
   const mapInstance = useRef(null);
   const activeBounds = useRef(null);
+  // When the scene changes *because* the analyst picked a search result in it, the result's own fly-to must win
+  const selectedResultRef = useRef(null);
+  selectedResultRef.current = selectedResult;
   // The scene layer can only be added once the map has loaded; a scene resumed from the catalog
   // on startup may arrive before that, so the layer effect must re-run when the map becomes ready.
   const [mapReady, setMapReady] = useState(false);
@@ -186,27 +199,22 @@ const MapView = forwardRef(function MapView(
   // Update raster layer when currentScene changes
   useEffect(() => {
     const map = mapInstance.current;
-    if (!map || !mapReady || !currentScene || (!currentScene.cog_path && !currentScene.cog_url)) return;
+    if (!map || !mapReady) return;
+    if (!currentScene || (!currentScene.cog_path && !currentScene.cog_url)) {
+      // No scene (e.g. the last one was deleted): show the empty map, not the previous scene's tiles
+      removeCogLayers(map);
+      activeBounds.current = null;
+      return;
+    }
 
     const targetUrl = currentScene.cog_url || currentScene.cog_path;
     const sourceId = `cog-source-${currentScene.scene_id}`;
     const layerId = `cog-layer-${currentScene.scene_id}`;
 
-    // Remove any previous COG layers & sources
-    const layers = map.getStyle().layers || [];
-    layers.forEach((l) => {
-      if (l.id.startsWith("cog-layer-")) {
-        if (map.getLayer(l.id)) map.removeLayer(l.id);
-      }
-    });
-    const sources = Object.keys(map.getStyle().sources || {});
-    sources.forEach((s) => {
-      if (s.startsWith("cog-source-")) {
-        if (map.getSource(s)) map.removeSource(s);
-      }
-    });
+    removeCogLayers(map);
 
     async function loadCog() {
+      const skipFit = selectedResultRef.current?.scene_id === currentScene.scene_id;
       try {
         const tileJsonUrl = `http://localhost:8000/tiles/cog/tilejson.json?url=${encodeURIComponent(
           targetUrl
@@ -242,11 +250,13 @@ const MapView = forwardRef(function MapView(
             [currentScene.bounds_wgs84[2], currentScene.bounds_wgs84[3]],
           ];
           activeBounds.current = fitTarget;
-          map.fitBounds(fitTarget, {
-            padding: 40,
-            duration: 1000,
-            maxZoom: 16,
-          });
+          if (!skipFit) {
+            map.fitBounds(fitTarget, {
+              padding: 40,
+              duration: 1000,
+              maxZoom: 16,
+            });
+          }
         } else {
           // Fetch TileJSON to get WGS84 bounds directly
           fetch(tileJsonUrl)
@@ -258,11 +268,13 @@ const MapView = forwardRef(function MapView(
                   [tileJson.bounds[2], tileJson.bounds[3]],
                 ];
                 activeBounds.current = fitTarget;
-                map.fitBounds(fitTarget, {
-                  padding: 40,
-                  duration: 1000,
-                  maxZoom: 16,
-                });
+                if (!skipFit) {
+                  map.fitBounds(fitTarget, {
+                    padding: 40,
+                    duration: 1000,
+                    maxZoom: 16,
+                  });
+                }
               }
             })
             .catch((err) => console.warn("TileJSON bounds lookup error:", err));

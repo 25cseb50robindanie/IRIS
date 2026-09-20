@@ -61,6 +61,10 @@ class ProgressTracker:
             for key, value in fields.items():
                 setattr(job, key, value)
 
+    def forget(self, scene_id: str) -> None:
+        with self._lock:
+            self._jobs.pop(scene_id, None)
+
     def fail(self, scene_id: str, error: str) -> None:
         self.update(scene_id, state=FAILED, error=error)
 

@@ -84,11 +84,11 @@ def test_search_api_e2e(tmp_path):
     search_data = search_resp.json()
 
     assert search_data["query"] == "satellite view of airport runway and aircraft"
-    assert search_data["total_results"] > 0
-    assert len(search_data["results"]) <= 5
+    assert len(search_data["semantic_results"]) > 0
+    assert len(search_data["semantic_results"]) <= 5
 
     # Check structure of top result
-    top_result = search_data["results"][0]
+    top_result = search_data["semantic_results"][0]
     assert "tile_id" in top_result
     assert "scene_id" in top_result
     assert "score" in top_result
@@ -96,12 +96,12 @@ def test_search_api_e2e(tmp_path):
     assert len(top_result["bounds"]) == 4  # [min_lon, min_lat, max_lon, max_lat]
 
     # Verify our ingested scene is present in results or top results
-    scene_ids = [r["scene_id"] for r in search_data["results"]]
+    scene_ids = [r["scene_id"] for r in search_data["semantic_results"]]
     assert len(scene_ids) > 0
     assert any("search_test" in sid or "S2A" in sid for sid in scene_ids)
 
     # Verify score is in descending order
-    scores = [r["score"] for r in search_data["results"]]
+    scores = [r["score"] for r in search_data["semantic_results"]]
     assert scores == sorted(scores, reverse=True)
 
 
