@@ -5,10 +5,14 @@ write lock up front with BEGIN IMMEDIATE.
 """
 
 import json
+import logging
 import sqlite3
 from typing import Any, Dict, List, Optional
 
+from catalog.watchlist import raise_alerts_for_job
 from mgrs_ref import bounds_centre_mgrs
+
+logger = logging.getLogger("iris.catalog.changes")
 
 # Job states: queued -> processing -> completed, or one of the terminal outcomes below
 JOB_QUEUED = "queued"
@@ -118,6 +122,7 @@ def finish_job(
     """Record a job outcome. Candidates and the status change commit in one transaction so they can't disagree."""
     conn.execute("BEGIN IMMEDIATE")
     try:
+        conn.execute("DELETE FROM watchlist_alerts WHERE job_id = ?", (job_id,))  # they point at the candidates below
         conn.execute("DELETE FROM change_candidates WHERE job_id = ?", (job_id,))
         for cand in candidates or []:
             conn.execute(
@@ -127,15 +132,15 @@ def finish_job(
                     min_x, min_y, max_x, max_y, min_lon, min_lat, max_lon, max_lat,
                     change_type, direction, confidence,
                     norm_rmse, norm_cluster_dist, terrain_flatness, valid_coverage,
-                    alignment_quality, area_px, mean_dndvi, direction_evidence,
-                    sub_blobs, centroid_lon, centroid_lat, mgrs_ref, geometry
+                    alignment_quality, area_px, area_ha, mean_dndvi, direction_evidence,
+                    sub_blobs, centroid_lon, centroid_lat, mgrs_ref, geometry, seasonality_status
                 ) VALUES (
                     :job_id, :scene_a_id, :scene_b_id,
                     :min_x, :min_y, :max_x, :max_y, :min_lon, :min_lat, :max_lon, :max_lat,
                     :change_type, :direction, :confidence,
                     :norm_rmse, :norm_cluster_dist, :terrain_flatness, :valid_coverage,
-                    :alignment_quality, :area_px, :mean_dndvi, :direction_evidence,
-                    :sub_blobs, :centroid_lon, :centroid_lat, :mgrs_ref, :geometry
+                    :alignment_quality, :area_px, :area_ha, :mean_dndvi, :direction_evidence,
+                    :sub_blobs, :centroid_lon, :centroid_lat, :mgrs_ref, :geometry, :seasonality_status
                 )
                 """,
                 {
@@ -144,6 +149,8 @@ def finish_job(
                     "centroid_lat": None,
                     "mgrs_ref": None,
                     "geometry": None,
+                    "seasonality_status": None,
+                    "area_ha": None,
                     **cand,
                     "job_id": job_id,
                     "direction_evidence": json.dumps(cand["direction_evidence"]) if cand.get("direction_evidence") else None,
@@ -153,7 +160,11 @@ def finish_job(
             "UPDATE jobs SET status=?, completed_at=datetime('now'), error_message=?, details=? WHERE job_id=?",
             (status, error, json.dumps(details), job_id),
         )
+        # "The system watches while you don't": new detections on a watched location raise alerts in the same transaction
+        alerts = raise_alerts_for_job(conn, job_id) if status == JOB_COMPLETED else 0
         conn.commit()
+        if alerts:
+            logger.info("Job %d raised %d watchlist alert(s)", job_id, alerts)
     except Exception:
         conn.rollback()
         raise
@@ -164,8 +175,8 @@ _CANDIDATE_SELECT = """
            c.min_x, c.min_y, c.max_x, c.max_y, c.min_lon, c.min_lat, c.max_lon, c.max_lat,
            c.change_type, c.direction, c.confidence,
            c.norm_cluster_dist, c.terrain_flatness, c.valid_coverage, c.alignment_quality,
-           c.area_px, c.mean_dndvi, c.created_at, c.direction_evidence,
-           c.sub_blobs, c.centroid_lon, c.centroid_lat, c.mgrs_ref,
+           c.area_px, c.area_ha, c.mean_dndvi, c.created_at, c.direction_evidence,
+           c.sub_blobs, c.centroid_lon, c.centroid_lat, c.mgrs_ref, c.seasonality_status,
            sa.acquisition_date, sb.acquisition_date, sa.sensor,
            (SELECT r.decision FROM reviews r WHERE r.candidate_id = c.candidate_id
               ORDER BY r.review_id DESC LIMIT 1)
@@ -177,8 +188,8 @@ _CANDIDATE_SELECT = """
 _CANDIDATE_KEYS = (
     "candidate_id job_id scene_a_id scene_b_id min_x min_y max_x max_y min_lon min_lat max_lon max_lat "
     "change_type direction confidence norm_cluster_dist terrain_flatness valid_coverage alignment_quality "
-    "area_px mean_dndvi created_at direction_evidence sub_blobs centroid_lon centroid_lat mgrs_ref "
-    "scene_a_date scene_b_date sensor review_status"
+    "area_px area_ha mean_dndvi created_at direction_evidence sub_blobs centroid_lon centroid_lat mgrs_ref "
+    "seasonality_status scene_a_date scene_b_date sensor review_status"
 ).split()
 
 
@@ -190,6 +201,8 @@ def _candidate_row(row: tuple) -> Dict[str, Any]:
         cand["change_type"] = "unclassified"  # stored before direction classification: the old names no longer exist
     cand["direction"] = cand["direction"] or "unclassified"
     cand["sub_blobs"] = cand["sub_blobs"] or 1
+    if cand["area_ha"] is None and cand["area_px"]:
+        cand["area_ha"] = cand["area_px"] / 100.0  # stored before pixel size was recorded: every earlier scene was 10 m
     if not cand["mgrs_ref"]:
         # Stored before MGRS geocoding, or the centroid was not traced: the centre of the bounding box stands in
         cand["mgrs_ref"] = bounds_centre_mgrs([cand["min_lon"], cand["min_lat"], cand["max_lon"], cand["max_lat"]])
@@ -251,6 +264,7 @@ def query_candidates(
     min_confidence: float = 0.0,
     types: Optional[List[str]] = None,
     directions: Optional[List[str]] = None,
+    hide_seasonal: bool = False,
 ) -> List[Dict[str, Any]]:
     """Candidates of the given jobs (all jobs when None), strongest first, optionally filtered."""
     where: List[str] = []
@@ -269,6 +283,8 @@ def query_candidates(
     if directions:
         where.append(f"{_DIRECTION_SQL} IN ({','.join('?' for _ in directions)})")
         args.extend(directions)
+    if hide_seasonal:
+        where.append("(c.seasonality_status IS NULL OR c.seasonality_status != 'seasonal')")
     sql = _CANDIDATE_SELECT + (" WHERE " + " AND ".join(where) if where else "")
     sql += " ORDER BY c.confidence DESC, c.area_px DESC, c.candidate_id ASC"
     return [_candidate_row(r) for r in conn.execute(sql, args).fetchall()]

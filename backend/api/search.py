@@ -68,8 +68,10 @@ class ChangeResultItem(BaseModel):
     confidence: float
     mean_dndvi: Optional[float] = None
     area_px: Optional[int] = None
+    area_ha: Optional[float] = None
     sub_blobs: int = 1  # change blobs merged into this detection
     mgrs: Optional[str] = None  # 10-digit MGRS reference of the detection's centroid
+    seasonality_status: Optional[str] = None  # seasonal | anomalous | unverified; None when the persistence check did not apply
     review_status: str
     semantic_match_score: float  # rank (0-1) of the after-crop's similarity among all tiles of the after scene
     semantic_similarity: float  # raw cosine similarity of that crop to the query
@@ -134,6 +136,7 @@ def _semantic_item(tile_meta: Dict[str, Any], score: float) -> SearchResultItem:
 def search_imagery(payload: SearchRequest) -> SearchResponse:
     """Semantic search plus change-aware search for one query."""
     started = time.perf_counter()
+    timer = instrumentation.PipelineTimer()  # where the time goes: model load, query encoding, FAISS search, change matching
     query_str = payload.query.strip()
     if not query_str:
         raise HTTPException(
@@ -152,7 +155,8 @@ def search_imagery(payload: SearchRequest) -> SearchResponse:
 
     # 2. Compute text query embedding via RemoteCLIP
     try:
-        embedder = RemoteCLIPEmbedder.get_instance()
+        with timer.time_stage("model_load"):  # ~0 once the model is resident
+            embedder = RemoteCLIPEmbedder.get_instance()
     except FileNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
     except Exception as e:
@@ -163,7 +167,8 @@ def search_imagery(payload: SearchRequest) -> SearchResponse:
         )
 
     try:
-        query_vector = embedder.embed_text(query_str)
+        with timer.time_stage("query_encoding"):
+            query_vector = embedder.embed_text(query_str)
     except Exception as e:
         logger.exception("Failed to encode search query with RemoteCLIP: %s", e)
         raise HTTPException(
@@ -184,13 +189,15 @@ def search_imagery(payload: SearchRequest) -> SearchResponse:
                     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown scene: {payload.scene_id}")
                 # 3a. Scene-scoped: the scene's tiles are the allowlist, scanned exactly
                 tiles = list_scene_tiles(conn, payload.scene_id)
-                scores, ids = vector_store.search_subset(query_vector, [t["faiss_id"] for t in tiles], payload.top_k)
+                with timer.time_stage("faiss_search"):
+                    scores, ids = vector_store.search_subset(query_vector, [t["faiss_id"] for t in tiles], payload.top_k)
                 tiles_map = get_tiles_by_faiss_ids(conn, [int(i) for i in ids])
                 ranked = [(int(i), float(s)) for i, s in zip(ids, scores)]
             else:
                 # 3b. Unscoped: cosine nearest neighbours over the whole index (over-fetched, see OVERFETCH_FACTOR)
                 fetch_k = max(payload.top_k * OVERFETCH_FACTOR, MIN_FETCH)
-                scores_2d, indices_2d = vector_store.search(query_vector, top_k=fetch_k)
+                with timer.time_stage("faiss_search"):
+                    scores_2d, indices_2d = vector_store.search(query_vector, top_k=fetch_k)
                 ranked = []
                 if len(indices_2d) and len(indices_2d[0]):
                     ranked = [(int(i), float(s)) for i, s in zip(indices_2d[0], scores_2d[0]) if i >= 0]
@@ -203,18 +210,20 @@ def search_imagery(payload: SearchRequest) -> SearchResponse:
             semantic = semantic[: payload.top_k]
 
             # 4. Change-aware search over the same tiles
-            change = analyse_changes(
-                conn,
-                vector_store,
-                query_vector,
-                payload.scene_id,
-                [{"bounds": r.bounds} for r in semantic],
-                query_str,
-            )
+            with timer.time_stage("change_matching"):
+                change = analyse_changes(
+                    conn,
+                    vector_store,
+                    query_vector,
+                    payload.scene_id,
+                    [{"bounds": r.bounds} for r in semantic],
+                    query_str,
+                )
     finally:
         conn.close()
 
-    instrumentation.record_query(instrumentation.QUERY_TEXT, time.perf_counter() - started)
+    total = time.perf_counter() - started
+    instrumentation.record_query(instrumentation.QUERY_TEXT, total, {**timer.to_dict(), "total": round(total * 1000.0, 1)})
     return SearchResponse(
         query=query_str,
         scene_id=payload.scene_id,

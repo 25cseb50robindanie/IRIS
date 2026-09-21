@@ -31,7 +31,14 @@ export const DIRECTION_ICONS = {
   unclassified: Minus,
 };
 
-export const changeLabel = (type) => (type && TYPE_LABELS[type] ? `${TYPE_LABELS[type]}` : "Unclassified change");
+// The seasonal persistence filter's verdict on a vegetation drop: only candidates it applied to carry one
+export const SEASONALITY = {
+  seasonal: { label: "Seasonal", style: "bg-neutral-200 text-neutral-700", hint: "This drop matches what this season usually looks like here" },
+  anomalous: { label: "Anomalous", style: "bg-red-100 text-red-800", hint: "This drop is beyond the normal variation for this season" },
+  unverified: { label: "Unverified", style: "bg-yellow-100 text-yellow-800", hint: "Too few earlier same-season scenes to check whether this is seasonal" },
+};
+
+export const changeLabel =(type) => (type && TYPE_LABELS[type] ? `${TYPE_LABELS[type]}` : "Unclassified change");
 export const directionLabel = (direction) => DIRECTION_LABELS[direction] || "Unclassified";
 
 export const allOn = (options) => Object.fromEntries(options.map(([key]) => [key, true]));
@@ -55,5 +62,7 @@ export function describeDirection(detail) {
   return `Direction: ${direction}${type}. Evidence: ${parts.join(", ")}.`;
 }
 
-// 10 m pixels are 100 m² each. One decimal always, so 24,730 px reads "247.3 ha" and a small blob "1.1 ha".
-export const hectares = (px) => `${(px / 100).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ha`;
+// Area in hectares. `ha` comes from the raster's pixel size (10 m Sentinel-2, 30 m Landsat); a candidate stored before it was
+// recorded has none and was always 10 m, i.e. 100 m² a pixel. One decimal always, so 247.3 ha reads "247.3 ha".
+export const hectares = (px, ha = null) =>
+  `${(ha ?? px / 100).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ha`;

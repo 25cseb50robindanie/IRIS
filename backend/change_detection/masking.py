@@ -28,15 +28,19 @@ class Validity:
     cloud_trust: float  # 1 - invalid / total pixels
     invalid_fraction: float
     snow_fraction: float  # valid but flagged: snow/ice
-    source: str  # "scl" or "data_mask"
+    source: str  # "scl" (Sentinel-2), "qa_pixel" (Landsat), "heuristic" (generic 4+ band raster) or "data_mask"
 
 
-def build_validity(analysis_path: Path, scl_path: Optional[Path]) -> Validity:
+def build_validity(
+    analysis_path: Path, scl_path: Optional[Path], mask_kind: str = "scl", heuristic_cloud_pct: Optional[float] = None
+) -> Validity:
     """Validity mask for one scene.
 
-    With an SCL: classes 4/5/6/7/11 are valid, 0/1/2/3/8/9/10 invalid. Without one (non-Sentinel-2 input) every
-    pixel that carries data is valid and CloudTrust is 1.0. Either way a pixel with no data in the analysis raster
-    is invalid: an outside-the-footprint zero is not an observation.
+    With a class raster (Sentinel-2 SCL, or a Landsat QA_PIXEL mask written in SCL codes, named by `mask_kind`): classes
+    4/5/6/7/11 are valid, 0/1/2/3/8/9/10 invalid. Without one every pixel that carries data is valid. CloudTrust is then
+    1.0, unless the scene has a heuristic cloud estimate (`heuristic_cloud_pct`, from a raster with a NIR band but no QA
+    band): the estimate lowers CloudTrust, and through it confidence, but never removes a pixel. Either way a pixel with
+    no data in the analysis raster is invalid: an outside-the-footprint zero is not an observation.
     """
     lut = _valid_lookup()
     with rasterio.open(str(analysis_path)) as ref:
@@ -64,6 +68,10 @@ def build_validity(analysis_path: Path, scl_path: Optional[Path]) -> Validity:
     total = height * width
     invalid_fraction = 1.0 - float(valid.sum()) / total if total else 1.0
     if scl_path is None:
-        logger.warning("No SCL for %s: treating every data pixel as valid, CloudTrust=1.0", analysis_path.name)
+        if heuristic_cloud_pct is not None:
+            trust = max(0.0, 1.0 - heuristic_cloud_pct / 100.0)
+            logger.info("Heuristic masking for %s: CloudTrust=%.2f, no pixel removed", analysis_path.name, trust)
+            return Validity(valid, trust, invalid_fraction, 0.0, "heuristic")
+        logger.warning("No QA band for %s: treating every data pixel as valid, CloudTrust=1.0", analysis_path.name)
         return Validity(valid, 1.0, invalid_fraction, 0.0, "data_mask")
-    return Validity(valid, 1.0 - invalid_fraction, invalid_fraction, snow / total if total else 0.0, "scl")
+    return Validity(valid, 1.0 - invalid_fraction, invalid_fraction, snow / total if total else 0.0, mask_kind)

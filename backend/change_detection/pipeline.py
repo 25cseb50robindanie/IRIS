@@ -3,14 +3,13 @@
 run_change_detection(scene_a_id, scene_b_id) runs Phases 1-5 for one ordered pair (A older, B newer) and
 records the outcome in the jobs / change_candidates tables. The job's `details` JSON is the decision trace:
 which masking path ran, how the grids compared, the alignment method and its quality, the PIF tier, the K-means
-centroids, and wall-clock time per phase.
+centroids, the seasonal-filter outcome, and wall-clock time per phase.
 """
 
 import gc
 import logging
 import re
 import shutil
-import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -37,6 +36,7 @@ from change_detection.masking import build_validity
 from change_detection.radiometry import fit_normalization
 from change_detection.rasters import SceneReader, bands_summary, grid_signature, grids_match, mgrs_tile_id
 from change_detection.scoring import finalize_candidates, score_candidates
+from change_detection.seasonal import apply_seasonality
 
 logger = logging.getLogger("iris.change.pipeline")
 
@@ -62,6 +62,12 @@ def _scene_paths(scene: Dict[str, Any]) -> Dict[str, Optional[Path]]:
         if not scl.is_file():
             raise ValueError(f"SCL raster for {scene['scene_id']} is missing on disk")
     return {"analysis": analysis, "scl": scl}
+
+
+def _mask_kwargs(scene: Dict[str, Any]) -> Dict[str, Any]:
+    """How to read a scene's mask: a Landsat mask is QA_PIXEL (in SCL codes); no mask but a cloud estimate is heuristic."""
+    kind = "qa_pixel" if str(scene.get("sensor", "")).startswith("landsat") else "scl"
+    return {"mask_kind": kind, "heuristic_cloud_pct": None if scene.get("scl_path") else scene.get("cloud_pct")}
 
 
 _PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|/)[^\s'\"),;]+")
@@ -120,8 +126,8 @@ def run_change_detection(scene_a_id: str, scene_b_id: str) -> Dict[str, Any]:
 
 
 def _execute(job_id: int, scene_a: Dict[str, Any], scene_b: Dict[str, Any]) -> Dict[str, Any]:
-    t_start = time.monotonic()
-    timings: Dict[str, float] = {}
+    timer = instrumentation.PipelineTimer()
+    timings: Dict[str, float] = {}  # seconds per phase, as the job's decision trace records them
     details: Dict[str, Any] = {
         "phase": "starting",
         "scene_a": {"scene_id": scene_a["scene_id"], "date": scene_a["acquisition_date"]},
@@ -130,24 +136,22 @@ def _execute(job_id: int, scene_a: Dict[str, Any], scene_b: Dict[str, Any]) -> D
     }
     work_dir = STAGING_DIR / f"change_{job_id}"
     det = None
-    t_phase = time.monotonic()
+
+    def sync_timings() -> None:
+        timings.update({name: round(ms / 1000.0, 2) for name, ms in timer.to_dict().items() if name != "starting"})
 
     def phase(name: str) -> None:
-        nonlocal t_phase
-        now = time.monotonic()
-        if details["phase"] != "starting":
-            timings[details["phase"]] = round(now - t_phase, 2)
-        t_phase = now
+        timer.begin(name)  # closes the previous phase
+        sync_timings()
         details["phase"] = name
         _persist(job_id, details)
         logger.info("Job %d: %s", job_id, name)
 
     def finish(status: str, error: Optional[str] = None, candidates=None) -> Dict[str, Any]:
-        now = time.monotonic()
-        if details["phase"] not in ("starting", "done"):
-            timings[details["phase"]] = round(now - t_phase, 2)
+        timer.end()
+        sync_timings()
         details["phase"] = "done"
-        timings["total"] = round(now - t_start, 2)
+        timings["total"] = round(timer.total_ms() / 1000.0, 2)
         _finish(job_id, status, details, error, candidates)
         instrumentation.record_change_detection(
             job_id, scene_a["scene_id"], scene_b["scene_id"], dict(timings), status, len(candidates or [])
@@ -160,8 +164,8 @@ def _execute(job_id: int, scene_a: Dict[str, Any], scene_b: Dict[str, Any]) -> D
 
         # ---- Phase 1: quality masking and CloudTrust ------------------------------------------------------
         phase("masking")
-        val_a = build_validity(paths_a["analysis"], paths_a["scl"])
-        val_b = build_validity(paths_b["analysis"], paths_b["scl"])
+        val_a = build_validity(paths_a["analysis"], paths_a["scl"], **_mask_kwargs(scene_a))
+        val_b = build_validity(paths_b["analysis"], paths_b["scl"], **_mask_kwargs(scene_b))
         details["masking"] = {
             "scene_a": {"source": val_a.source, "cloud_trust": round(val_a.cloud_trust, 4), "snow_fraction": round(val_a.snow_fraction, 4)},
             "scene_b": {"source": val_b.source, "cloud_trust": round(val_b.cloud_trust, 4), "snow_fraction": round(val_b.snow_fraction, 4)},
@@ -192,7 +196,7 @@ def _execute(job_id: int, scene_a: Dict[str, Any], scene_b: Dict[str, Any]) -> D
             if not grids_match(sig_a, grid_signature(regridded)):
                 raise GridMismatch("Scene B could not be brought onto scene A's pixel grid")
             analysis_b = regridded
-            valid_b = build_validity(regridded, regridded_scl).valid
+            valid_b = build_validity(regridded, regridded_scl, **_mask_kwargs(scene_b)).valid
             details["grid"] = {"matched": False, "regridded": True, "scl_resampling": "nearest"}
 
         mutual = val_a.valid & valid_b
@@ -223,6 +227,8 @@ def _execute(job_id: int, scene_a: Dict[str, Any], scene_b: Dict[str, Any]) -> D
             raise InsufficientEvidence(
                 f"Mutual valid coverage after alignment {coverage:.1%} is below the {params.MIN_MUTUAL_COVERAGE:.0%} minimum"
             )
+        src_a, src_b = val_a.source, val_b.source
+        cloud_trust_a, cloud_trust_b = val_a.cloud_trust, val_b.cloud_trust
         del val_a, val_b, valid_b
         gc.collect()
 
@@ -245,9 +251,12 @@ def _execute(job_id: int, scene_a: Dict[str, Any], scene_b: Dict[str, Any]) -> D
         phase("scoring")
         with rasterio.open(str(paths_a["analysis"])) as src:
             transform, crs = src.transform, (src.crs.to_string() if src.crs else None)
+        # A heuristic cloud estimate removed no pixel, so it reaches confidence here instead
+        trust = min(v for v, src in ((cloud_trust_a, src_a), (cloud_trust_b, src_b)) if src == "heuristic") if "heuristic" in (src_a, src_b) else 1.0
         candidates, score_trace = score_candidates(
-            det, mutual, alignment.quality, transform, crs, scene_a["scene_id"], scene_b["scene_id"]
+            det, mutual, alignment.quality, transform, crs, scene_a["scene_id"], scene_b["scene_id"], cloud_trust=trust
         )
+        score_trace["cloud_trust_factor"] = round(trust, 4)
         details["scoring"] = score_trace
 
         # ---- Phase 4b: direction and refined change type for every surviving blob ---------------------------
@@ -259,6 +268,10 @@ def _execute(job_id: int, scene_a: Dict[str, Any], scene_b: Dict[str, Any]) -> D
         candidates = finalize_candidates(merge_candidates(candidates, crs), score_trace)
         attach_geometry(det, candidates, transform, crs)
         details["grouping"]["detections"] = len(candidates)
+
+        # ---- Seasonal persistence filter: is this vegetation drop just the time of year? -------------------
+        phase("seasonality")
+        details["seasonality"] = apply_seasonality(candidates, scene_b)
         return finish(jobs.JOB_COMPLETED, candidates=candidates)
 
     except InsufficientEvidence as e:

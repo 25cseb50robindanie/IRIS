@@ -90,6 +90,23 @@ STORED_AREA_RESERVE = 500
 DISPLAY_CAP_PER_JOB = 200  # candidates shown per pair, highest confidence first
 NDVI_DROP_SIG = 0.15  # |mean dNDVI| above this labels a blob vegetation gain/loss
 
+# --- Seasonal persistence filter (seasonal.py) -------------------------------------------------------------------
+# A vegetation drop can be the calendar (harvest, dry season) rather than an event. The candidate's location is looked up
+# in earlier years of the same season; if the current NDVI is within normal variation of what that season usually looks
+# like, the drop is seasonal.
+SEASONAL_TYPES = ("clearance", "vegetation_loss", "vegetation_retreat")  # vegetation_loss = name used before Phase 4b
+SEASONAL_WINDOW_DAYS = 30  # a prior scene counts when it was taken within this many days of the same date in its year
+SEASONAL_MIN_PRIORS = 3  # fewer clear priors than this and the check cannot be made: "unverified"
+SEASONAL_SIGMAS = 2.0  # a drop within this many std devs of the seasonal history is "seasonal", beyond it "anomalous"
+SEASONAL_MIN_STD = 0.05  # floor on the history's std dev: three near-identical scenes must not make every drop anomalous
+SEASONAL_MIN_VALID = 0.5  # a prior scene is clear at a candidate when this share of its pixels is valid (SCL, data mask)
+SEASONAL_CONFIDENCE_FACTOR = 0.5  # confidence multiplier for a seasonal candidate
+UNVERIFIED_CONFIDENCE_FACTOR = 0.85  # ... and for one that could not be checked
+SEASONAL_MAX_SAMPLE_PX = 256  # a candidate's window is decimated to at most this many pixels a side when sampled
+
+# --- Ablation (ablation.py) ----------------------------------------------------------------------------------------
+MAX_ABLATION_STORED = 5000  # raw detections stored per pair (largest first); the true total is always recorded
+
 # --- Phase 4b: direction classification -------------------------------------------------------------------
 # Per-date Classification Components. Index thresholds are strongly scene-dependent (architecture.md prefers
 # per-scene Otsu); these fixed values are the domain-standard starting points.

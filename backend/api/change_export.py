@@ -7,7 +7,7 @@ was made; a candidate stored before outlines were kept falls back to its boundin
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Query
 from fastapi.responses import Response
@@ -66,8 +66,9 @@ def _feature(cand: Dict[str, Any], geometry_json: Optional[str], details: Dict[s
             "processing": processing_block(details),
             # Beyond the core record: enough to check the number and to reproduce the input
             "area_px": cand["area_px"],
-            "area_ha": None if cand["area_px"] is None else round(cand["area_px"] / 100.0, 2),  # 10 m pixels
+            "area_ha": None if cand["area_ha"] is None else round(cand["area_ha"], 2),  # from the raster's pixel size
             "sub_blobs": cand["sub_blobs"],
+            "seasonality_status": cand["seasonality_status"],
             "direction_evidence": cand["direction_evidence"],
             "geometry_source": source,
             "raw_checksum_a": checksums.get(cand["scene_a_id"]),
@@ -82,13 +83,22 @@ def _feature(cand: Dict[str, Any], geometry_json: Optional[str], details: Dict[s
 def export_changes(
     job_id: Optional[int] = Query(default=None, description="Only this pair's candidates"),
     min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+    decision: Literal["all", "confirmed", "pending", "rejected"] = Query(
+        default="all", description="Only candidates with this analyst decision; 'all' exports everything, whatever its status"
+    ),
 ) -> Response:
-    """GeoJSON FeatureCollection of change candidates (all of them by default), as a download."""
+    """GeoJSON FeatureCollection of change candidates (all of them by default), as a download.
+
+    Every feature carries `analyst_decision` ("confirmed", "rejected" or "pending"), so an export of everything can be
+    filtered again outside IRIS; `decision` narrows the export itself. The UI's own filters never apply here.
+    """
     conn = init_connection()
     try:
         init_schema(conn)
         jobs = {j["job_id"]: j for j in store.list_jobs(conn)}
         cands = store.query_candidates(conn, job_ids=None if job_id is None else [job_id], min_confidence=min_confidence)
+        if decision != "all":
+            cands = [c for c in cands if c["review_status"] == decision]
         geometry = dict(conn.execute("SELECT candidate_id, geometry FROM change_candidates").fetchall())
         checksums = dict(conn.execute("SELECT scene_id, raw_checksum FROM scenes").fetchall())
         reviews: Dict[int, List[Dict[str, Any]]] = {c["candidate_id"]: store.get_reviews(conn, c["candidate_id"]) for c in cands}
@@ -105,6 +115,7 @@ def export_changes(
         "name": "iris_change_candidates",
         "crs": GEOJSON_CRS,
         "generated_at": now.isoformat(timespec="seconds"),
+        "decision_filter": decision,
         "feature_count": len(features),
         "features": features,
     }
@@ -112,5 +123,5 @@ def export_changes(
     return Response(
         content=json.dumps(body),
         media_type="application/geo+json",
-        headers={"Content-Disposition": f'attachment; filename="iris_changes_{now:%Y%m%d}.geojson"'},
+        headers={"Content-Disposition": f'attachment; filename="iris_changes{"" if decision == "all" else "_" + decision}_{now:%Y%m%d}.geojson"'},
     )

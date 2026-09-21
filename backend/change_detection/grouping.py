@@ -215,6 +215,8 @@ def merge_candidates(rows: List[Dict[str, Any]], crs: Optional[str]) -> List[Dic
                     logger.warning("Could not reproject merged bounds to WGS84; using the union of blob bounds")
             out["min_lon"], out["min_lat"], out["max_lon"], out["max_lat"] = wgs
             out["area_px"] = int(sum(m["area_px"] for m in members))
+            if all(m.get("area_ha") is not None for m in members):
+                out["area_ha"] = round(sum(m["area_ha"] for m in members), 4)
             with_ndvi = [m for m in members if m["mean_dndvi"] is not None]
             weight = sum(m["area_px"] for m in with_ndvi)
             out["mean_dndvi"] = sum(m["mean_dndvi"] * m["area_px"] for m in with_ndvi) / weight if weight else None

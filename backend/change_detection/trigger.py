@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from catalog import changes as jobs
 from catalog.database import find_overlapping_scenes, get_scene, init_connection, init_schema
+from change_detection.ablation import run_ablation
 from change_detection.pipeline import run_change_detection
 
 logger = logging.getLogger("iris.change.trigger")
@@ -87,9 +88,29 @@ def schedule_change_detection(scene_id: str, reporter: Optional[Reporter] = None
         except Exception as e:
             logger.exception("Change detection for %s -> %s could not start", a_id, b_id)
             result = {"job_id": None, "status": "failed", "candidates": 0, "error": f"{type(e).__name__}"}
+        result = {**result, "scene_a_id": a_id, "scene_b_id": b_id}
         results.append(result)
         rep.pair_finished(scene_id, a_id, b_id, result)
     return results
+
+
+def run_ablations(results: List[Dict[str, Any]]) -> int:
+    """Run the ablation for every pair that has just completed. Returns how many succeeded.
+
+    Kept apart from schedule_change_detection so the import can report "complete" first: the ablation is for the analyst
+    who wants to see what the suppression stack removes, not something the import waits on. A failure is recorded on the
+    job and logged; it never affects the analysis it belongs to.
+    """
+    done = 0
+    for r in results:
+        if r.get("status") != "completed" or r.get("candidates") is None:  # None: an earlier run, not re-run now
+            continue
+        try:
+            run_ablation(r["scene_a_id"], r["scene_b_id"])
+            done += 1
+        except Exception:
+            logger.warning("Ablation for %s -> %s did not complete", r["scene_a_id"], r["scene_b_id"])
+    return done
 
 
 def reconcile_interrupted_jobs() -> int:

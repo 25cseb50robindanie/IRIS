@@ -60,6 +60,7 @@ class Scenario:
     patches: List[Tuple[int, int, int, int, float]] = field(default_factory=list)  # (r0, r1, c0, c1, NIR factor)
     landcover: List[Tuple[int, int, int, int, str]] = field(default_factory=list)  # (r0, r1, c0, c1, kind) repainted
     cloud: Optional[Tuple[int, int, int, int]] = None  # (r0, r1, c0, c1) painted as SCL class 9
+    clouds: List[Tuple[int, int, int, int]] = field(default_factory=list)  # further clouds, same painting
     nodata_rows: int = 0  # bottom rows with no data (SCL 0)
     origin: Tuple[float, float] = (300000.0, 3100000.0)  # UTM upper-left; move it for a different grid
     crs: str = "EPSG:32643"
@@ -103,8 +104,7 @@ def render(scn: Scenario) -> Tuple[np.ndarray, np.ndarray]:
 
     scl = np.full((size // 2, size // 2), 4, dtype=np.uint8)  # vegetation
     scl[: size // 8, :] = 5  # a strip of bare soil
-    if scn.cloud is not None:
-        r0, r1, c0, c1 = scn.cloud
+    for r0, r1, c0, c1 in ([scn.cloud] if scn.cloud is not None else []) + list(scn.clouds):
         scl[r0 // 2 : r1 // 2, c0 // 2 : c1 // 2] = 9
         bands[:, r0:r1, c0:c1] = 9000 + rng.normal(0, 30, (4, r1 - r0, c1 - c0))  # bright cloud
     if scn.nodata_rows:
@@ -178,6 +178,120 @@ def ingest_without_embedding(safe_or_file: Path) -> str:
                 "scl_path": f"data/cogs/{outputs.scl_cog.name}",
                 "cloud_pct": outputs.cloud_pct,
                 "raw_checksum": metadata.raw_checksum,
+            },
+            bounds_wgs84=metadata.bounds_wgs84,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return metadata.scene_id
+
+
+# ---- Landsat Collection 2 Level-2 and generic rasters -------------------------------------------------------------------
+
+
+LANDSAT_CLEAR_QA = 21824  # QA_PIXEL of a clear land pixel: bits 3 (cloud), 4 (shadow) and 5 (snow) all zero
+
+
+def _write_gtiff(path: Path, data: np.ndarray, transform, crs: str) -> None:
+    """A real GeoTIFF (Landsat ships GeoTIFFs; _write prefers JPEG2000, which would be wrong for a .TIF)."""
+    io_path(path.parent).mkdir(parents=True, exist_ok=True)
+    with rasterio.open(
+        str(path), "w", driver="GTiff", height=data.shape[0], width=data.shape[1], count=1, dtype=str(data.dtype),
+        crs=crs, transform=transform,
+    ) as dst:
+        dst.write(data, 1)
+
+
+def make_landsat(root: Path, prefix: str, scn: Scenario, snow: Optional[Tuple[int, int, int, int]] = None) -> Path:
+    """Write a Landsat C2 L2 scene folder <root>/<prefix>/ with SR_B2..B5 and QA_PIXEL (30 m, uint16) and return it.
+
+    The scene is `scn` rendered like a Sentinel-2 scene, then re-expressed in Landsat's scaling (reflectance = DN * 2.75e-5 -
+    0.2). The scenario's cloud / clouds become QA_PIXEL cloud bits (bit 3) and its no-data rows fill (bit 0); `snow` is a
+    (r0, r1, c0, c1) box of snow bits (bit 5). The scenario's landcover, gain and so on apply as for Sentinel-2.
+    """
+    bands, scl = render(scn)  # Sentinel-2 DN (with the -1000 baseline offset), scl at half resolution
+    reflectance = (bands.astype(np.float32) + BASELINE_OFFSET) / 10000.0
+    raw = np.clip(np.rint((reflectance + 0.2) / 2.75e-5), 1, 65535).astype(np.uint16)
+    raw[:, (bands == 0).all(axis=0)] = 0  # fill
+
+    qa_full = np.full(bands.shape[1:], LANDSAT_CLEAR_QA, dtype=np.uint16)
+    scl_full = np.kron(scl, np.ones((2, 2), dtype=np.uint8))
+    qa_full[scl_full == 9] |= 1 << 3
+    qa_full[scl_full == 3] |= 1 << 4
+    qa_full[scl_full == 0] |= 1
+    if snow is not None:
+        r0, r1, c0, c1 = snow
+        qa_full[r0:r1, c0:c1] |= 1 << 5
+
+    folder = root / prefix
+    transform = from_origin(scn.origin[0], scn.origin[1], 30.0, 30.0)
+    for suffix, arr in zip(("SR_B2", "SR_B3", "SR_B4", "SR_B5"), raw):
+        _write_gtiff(folder / f"{prefix}_{suffix}.TIF", arr, transform, scn.crs)
+    _write_gtiff(folder / f"{prefix}_QA_PIXEL.TIF", qa_full, transform, scn.crs)
+    return folder
+
+
+def ingest_landsat_without_embedding(folder: Path) -> str:
+    """Catalog a Landsat scene exactly as POST /api/ingest does, minus the embedding job. Returns the scene_id."""
+    from catalog.database import init_connection, init_schema, upsert_scene
+    from ingestion.landsat import build_landsat_cogs, inspect_landsat_product, open_landsat_product
+
+    product = open_landsat_product(folder)
+    assert product is not None
+    metadata = inspect_landsat_product(product)
+    outputs = build_landsat_cogs(product)
+    conn = init_connection()
+    try:
+        init_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        upsert_scene(
+            conn,
+            {
+                "scene_id": metadata.scene_id, "sensor": metadata.sensor, "acquisition_date": metadata.acquisition_date,
+                "crs": metadata.crs, "file_path": str(folder), "cog_path": f"data/cogs/{outputs.display_cog.name}",
+                "analysis_cog_path": f"data/cogs/{outputs.analysis_cog.name}", "scl_path": f"data/cogs/{outputs.scl_cog.name}",
+                "cloud_pct": outputs.cloud_pct, "raw_checksum": metadata.raw_checksum,
+            },
+            bounds_wgs84=metadata.bounds_wgs84,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return metadata.scene_id
+
+
+def make_generic(path: Path, data: np.ndarray, res: float = 30.0, crs: str = "EPSG:32643", origin=(300000.0, 3100000.0)) -> Path:
+    """Write a plain multi-band GeoTIFF (bands, H, W) with no QA band at `res` metres."""
+    io_path(path.parent).mkdir(parents=True, exist_ok=True)
+    transform = from_origin(origin[0], origin[1], res, res)
+    with rasterio.open(
+        str(path), "w", driver="GTiff", height=data.shape[1], width=data.shape[2], count=data.shape[0],
+        dtype=str(data.dtype), crs=crs, transform=transform, nodata=0,
+    ) as dst:
+        dst.write(data)
+    return path
+
+
+def ingest_generic_without_embedding(file_path: Path) -> str:
+    """Catalog a generic raster as POST /api/ingest does (COG(s), heuristic cloud estimate), minus embedding."""
+    from catalog.database import init_connection, init_schema, upsert_scene
+    from ingestion.loader import convert_generic_to_cogs, heuristic_cloud_pct, inspect_raster
+
+    metadata = inspect_raster(file_path)
+    outputs = convert_generic_to_cogs(file_path, metadata)
+    cloud_pct = heuristic_cloud_pct(file_path, metadata.sensor)
+    conn = init_connection()
+    try:
+        init_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        upsert_scene(
+            conn,
+            {
+                "scene_id": metadata.scene_id, "sensor": metadata.sensor, "acquisition_date": metadata.acquisition_date,
+                "crs": metadata.crs, "file_path": str(file_path), "cog_path": f"data/cogs/{outputs.display_cog.name}",
+                "analysis_cog_path": f"data/cogs/{outputs.analysis_cog.name}" if outputs.analysis_cog else None,
+                "scl_path": None, "cloud_pct": cloud_pct, "raw_checksum": metadata.raw_checksum,
             },
             bounds_wgs84=metadata.bounds_wgs84,
         )

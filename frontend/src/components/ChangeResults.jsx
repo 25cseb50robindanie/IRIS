@@ -1,18 +1,30 @@
 import React, { useMemo, useState } from "react";
-import { GitCompare, Loader2, AlertCircle, Check, Ban, Copy, Download, ShieldCheck, Images } from "lucide-react";
+import { AlertTriangle, Loader2, AlertCircle, Check, Ban, Copy, Download, ShieldCheck, Images } from "lucide-react";
 import { downloadJson } from "../download";
 import { boundsMgrs, spacedMgrs } from "../mgrs";
 import ExportMenu from "./ExportMenu";
-import { allOn, changeLabel, DIRECTION_ICONS, DIRECTION_OPTIONS, directionLabel, hectares, TYPE_OPTIONS } from "./changeKinds";
-import SectionHeader from "./SectionHeader";
+import { allOn, changeLabel, DIRECTION_ICONS, DIRECTION_OPTIONS, directionLabel, hectares, SEASONALITY, TYPE_OPTIONS } from "./changeKinds";
 
 export const DEFAULT_FILTERS = {
   minConfidence: 0.3,
   types: allOn(TYPE_OPTIONS),
   directions: allOn(DIRECTION_OPTIONS),
   sort: "confidence",
+  hideSeasonal: true, // leave out drops the persistence filter calls seasonal
   jobId: null,
 };
+
+/** The search-view matches that pass the analyst's filters (the browse view is filtered by the server). */
+export function applyMatchFilters(results, filters) {
+  return (results || []).filter(
+    (c) =>
+      c.confidence >= filters.minConfidence &&
+      filters.types[c.change_type || "unclassified"] !== false &&
+      filters.directions[c.direction || "unclassified"] !== false &&
+      !(filters.hideSeasonal && c.seasonality_status === "seasonal") &&
+      (filters.jobId == null || c.job_id === filters.jobId)
+  );
+}
 
 // Pair jobs that are not (yet) a result the analyst can browse
 const JOB_STATES = {
@@ -30,9 +42,14 @@ const PHASE_TEXT = {
   alignment: "alignment",
   radiometry: "normalisation",
   detection: "detection",
+  grouping: "grouping",
   scoring: "scoring",
   direction: "direction classification",
+  merging: "merging",
+  seasonality: "seasonal filter",
 };
+
+const ABLATION_CARD_CAP = 200; // cards drawn in the list; the map shows every raw detection that was fetched
 
 const REVIEW_STYLE = {
   pending: "bg-neutral-100 text-neutral-600",
@@ -167,6 +184,16 @@ function ChangeFilters({ filters, onChange, showMatchSort }) {
           ))}
         </div>
       ))}
+      <label className="flex items-center space-x-1.5 cursor-pointer" title="Vegetation drops that match what this season usually looks like here">
+        <input
+          type="checkbox"
+          checked={filters.hideSeasonal}
+          onChange={(e) => onChange({ ...filters, hideSeasonal: e.target.checked })}
+          className="w-3 h-3"
+          data-testid="hide-seasonal"
+        />
+        <span>Hide seasonal</span>
+      </label>
       <label className="flex items-center space-x-2">
         <span className="w-24 shrink-0">Sort by</span>
         <select
@@ -189,7 +216,8 @@ function ChangeCard({ c, rank, selected, onOpen, onFindSimilar, showMatch }) {
   const status = c.review_status || "pending";
   const DirectionIcon = DIRECTION_ICONS[c.direction || "unclassified"];
   const mgrsRef = c.mgrs || boundsMgrs(c.bounds);
-  const open = () => onOpen && onOpen(c.candidate_id);
+  const season = SEASONALITY[c.seasonality_status];
+  const open = () => onOpen && onOpen(c.candidate_id, "list");
   // A div, not a button: the card holds its own Find Similar button, and buttons cannot nest
   return (
     <div
@@ -203,6 +231,7 @@ function ChangeCard({ c, rank, selected, onOpen, onFindSimilar, showMatch }) {
         }
       }}
       data-testid="change-card"
+      data-candidate-id={c.candidate_id}
       data-review-status={status}
       className={`w-full text-left p-2 rounded-[3px] border transition-colors cursor-pointer ${
         selected ? `border-neutral-500 ${status === "pending" ? "bg-neutral-100" : CARD_STYLE[status].split(" ")[0]}` : CARD_STYLE[status]
@@ -219,6 +248,16 @@ function ChangeCard({ c, rank, selected, onOpen, onFindSimilar, showMatch }) {
           <span className={`text-xs font-semibold truncate ${TITLE_STYLE[status]}`} data-testid="change-title">
             {changeLabel(c.change_type)}
           </span>
+          {season && (
+            <span
+              className={`px-1.5 py-px rounded-[3px] text-[10px] font-medium shrink-0 ${season.style}`}
+              title={season.hint}
+              data-testid="seasonality-badge"
+              data-seasonality={c.seasonality_status}
+            >
+              {season.label}
+            </span>
+          )}
         </div>
         <span className="font-mono text-xs font-semibold text-neutral-800 shrink-0" title="Detection confidence">
           {pct(c.confidence)}
@@ -247,7 +286,7 @@ function ChangeCard({ c, rank, selected, onOpen, onFindSimilar, showMatch }) {
       <div className="mt-0.5 font-mono text-[10px] text-neutral-400 truncate">
         {c.scene_a_date} → {c.scene_b_date}
         {c.mean_dndvi != null ? ` · ΔNDVI ${c.mean_dndvi.toFixed(2)}` : ""}
-        {c.area_px ? ` · ${hectares(c.area_px)}` : ""}
+        {c.area_px ? ` · ${hectares(c.area_px, c.area_ha)}` : ""}
         {c.sub_blobs > 1 ? ` · ${c.sub_blobs} blobs merged` : ""}
       </div>
 
@@ -398,8 +437,101 @@ const LinkButton = ({ onClick, children }) => (
 );
 
 /**
- * Change section of the Workspace. Before a search it lists every detected change (server-side filtered); after a
- * search it shows the changes that match the query, or says why there are none.
+ * The Ablation switch. Off: the full pipeline's results. On: every suppression stage is off and the raw detections are
+ * shown instead. Orange-red when on, so nobody mistakes the raw list for the real one.
+ */
+function AblationSwitch({ on, onToggle, disabled }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      disabled={disabled}
+      onClick={onToggle}
+      data-testid="ablation-toggle"
+      title="Switch the suppression stack off to see every raw detection"
+      className={`flex items-center space-x-1.5 px-2 py-1 rounded-[3px] border text-[11px] font-semibold transition-colors disabled:opacity-40 ${
+        on ? "bg-red-600 border-red-700 text-white shadow-sm" : "bg-white border-neutral-300 text-neutral-700 hover:bg-neutral-100"
+      }`}
+    >
+      <span className={`relative inline-block w-6 h-3 rounded-full ${on ? "bg-red-900/50" : "bg-neutral-300"}`}>
+        <span className={`absolute top-0.5 w-2 h-2 rounded-full bg-white transition-all ${on ? "left-3.5" : "left-0.5"}`} />
+      </span>
+      <span>Ablation</span>
+    </button>
+  );
+}
+
+/** "312 raw detections against 23 with the full pipeline": the demo's single most persuasive line. */
+function AblationBanner({ stats, list, error }) {
+  if (error) {
+    return (
+      <div className="mb-2 border border-red-300 bg-red-50 rounded-[3px] p-2 text-[11px] text-red-800" data-testid="ablation-banner">
+        {error}
+      </div>
+    );
+  }
+  if (!stats || stats.status === "running" || stats.status === "not_run") {
+    return (
+      <div
+        className="mb-2 border border-red-300 bg-red-50 rounded-[3px] p-2 flex items-center space-x-1.5 text-[11px] text-red-800"
+        data-testid="ablation-banner"
+      >
+        <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+        <span>Computing the raw detections with suppression off...</span>
+      </div>
+    );
+  }
+  if (stats.status === "failed") {
+    return (
+      <div className="mb-2 border border-red-300 bg-red-50 rounded-[3px] p-2 text-[11px] text-red-800" data-testid="ablation-banner">
+        The ablation could not be computed for this pair.
+      </div>
+    );
+  }
+  const removes = stats.reduction_pct != null && stats.reduction_pct > 0;
+  return (
+    <div
+      className="mb-2 border border-red-400 bg-red-50 rounded-[3px] p-2.5 text-[11px] leading-snug text-red-900"
+      data-testid="ablation-banner"
+    >
+      <div className="flex items-start space-x-1.5">
+        <AlertTriangle className="w-3.5 h-3.5 text-red-600 shrink-0 mt-px" />
+        <div>
+          <span className="font-bold">Suppression OFF</span> — {stats.ablation_count.toLocaleString()} raw detections vs{" "}
+          {stats.full_count.toLocaleString()} with full pipeline.
+          {removes && ` The suppression stack removes ${stats.reduction_pct}% of false alarms.`}
+        </div>
+      </div>
+      {list && list.shown < stats.ablation_count && (
+        <div className="mt-1 text-red-700/80">
+          The {list.shown.toLocaleString()} largest are drawn and listed.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AblationCard({ c, rank }) {
+  const mgrsRef = c.mgrs || boundsMgrs(c.bounds);
+  return (
+    <div className="p-2 rounded-[3px] border border-red-200 bg-red-50/40" data-testid="ablation-card">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center space-x-1.5">
+          <span className="bg-red-700 text-white rounded-[2px] text-[10px] font-mono font-bold px-1 py-px">#{rank}</span>
+          <span className="text-xs font-semibold text-red-900">Raw detection</span>
+        </div>
+        <span className="font-mono text-xs font-semibold text-red-900">{hectares(c.area_px, c.area_ha)}</span>
+      </div>
+      <div className="mt-1 font-mono text-[10px] text-neutral-500 truncate">{centre(c.bounds)}</div>
+      {mgrsRef && <div className="mt-0.5 font-mono text-[10px] text-neutral-500 truncate">MGRS {spacedMgrs(mgrsRef)}</div>}
+    </div>
+  );
+}
+
+/**
+ * The Changes tab. Before a search it lists every detected change (server-side filtered); after a search it shows the
+ * changes that match the query, or says why there are none. With the ablation on it lists the raw detections instead.
  */
 export default function ChangeResults({
   changes,
@@ -412,23 +544,18 @@ export default function ChangeResults({
   selectedChangeId,
   onOpenChange,
   onFindSimilar,
-  open = true,
-  onToggle,
+  ablation = null, // {on, onToggle, available, stats, list, error}
+  onNotify = null,
 }) {
   const pairs = changes?.pairs || [];
   const inSearch = view === "search" && search?.hasSearched;
   const pendingJobs = changeJobs.filter((j) => j.status !== "completed");
   const completedPairs = pairs.filter((p) => p.status === "completed");
+  const ablationOn = Boolean(ablation?.on);
 
   // Search view: the backend returns the matching changes; the analyst's filters narrow them here
   const visibleMatches = useMemo(() => {
-    const rows = (search?.results || []).filter(
-      (c) =>
-        c.confidence >= filters.minConfidence &&
-        filters.types[c.change_type || "unclassified"] !== false &&
-        filters.directions[c.direction || "unclassified"] !== false &&
-        (filters.jobId == null || c.job_id === filters.jobId)
-    );
+    const rows = applyMatchFilters(search?.results, filters);
     const sorters = {
       match: (a, b) => b.combined_score - a.combined_score,
       confidence: (a, b) => b.confidence - a.confidence,
@@ -477,7 +604,6 @@ export default function ChangeResults({
     return null;
   }, [inSearch, search, completedPairs, changes, filters.jobId]);
 
-  const count = inSearch ? (search.status === "found" ? search.meta.matching_candidates : 0) : changes?.total ?? 0;
   const noComparison = inSearch ? search.status === "no_comparison_available" : pairs.length === 0 && changeJobs.length === 0;
   const showBrowse = (inSearch && search.status === "found") || (!inSearch && (changes?.total ?? 0) > 0);
 
@@ -493,18 +619,40 @@ export default function ChangeResults({
     }
   }
 
+  const ablationList = ablation?.list?.candidates || [];
+
   return (
     <div className="p-3">
-      <SectionHeader
-        icon={GitCompare}
-        title="Change Results"
-        count={count}
-        open={open}
-        onToggle={onToggle}
-        actions={<ExportMenu candidateCount={changes?.total ?? 0} />}
-      />
+      <div className="flex items-center justify-between mb-2">
+        {ablation ? (
+          <AblationSwitch on={ablationOn} onToggle={ablation.onToggle} disabled={!ablation.available} />
+        ) : (
+          <span />
+        )}
+        <ExportMenu
+          candidateCount={changes?.total ?? 0}
+          reviewCounts={changes?.review_counts}
+          onError={onNotify && ((message) => onNotify({ kind: "error", title: "Export failed", message }))}
+        />
+      </div>
 
-      {open && (
+      {ablationOn ? (
+        <>
+          <AblationBanner stats={ablation.stats} list={ablation.list} error={ablation.error} />
+          {ablation.stats?.status === "completed" && ablationList.length > 0 && (
+            <>
+              <div className="mb-1.5 text-[11px] text-red-800 font-mono" data-testid="ablation-count">
+                Showing {Math.min(ablationList.length, ABLATION_CARD_CAP)} of {ablation.stats.ablation_count.toLocaleString()} raw detections (largest first)
+              </div>
+              <div className="space-y-1.5">
+                {ablationList.slice(0, ABLATION_CARD_CAP).map((c, idx) => (
+                  <AblationCard key={c.candidate_id} c={c} rank={idx + 1} />
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      ) : (
         <>
           {inSearch && (
             <div className="mb-2 text-[11px] text-neutral-500 italic truncate" title={search.query}>

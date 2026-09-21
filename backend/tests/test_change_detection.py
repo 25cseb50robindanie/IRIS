@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import change_detection.alignment as alignment_module
 from catalog import changes
 from catalog.database import init_connection, init_schema, upsert_scene
-from change_detection import run_change_detection
+from change_detection import params, run_change_detection
 from change_detection.trigger import plan_pairs, reconcile_interrupted_jobs
 from s2_factory import Scenario, ingest_without_embedding, make_safe, render
 
@@ -81,7 +81,9 @@ def test_real_change_is_found_where_it_happened_despite_shift_and_gain(tmp_path)
         + 0.15 * cand["terrain_flatness"]
         + 0.15 * cand["valid_coverage"]
     )
-    assert cand["confidence"] == pytest.approx(expected, abs=1e-9)
+    # a vegetation clearance with no same-season history is "unverified", which discounts it (seasonal.py)
+    assert cand["seasonality_status"] == "unverified"
+    assert cand["confidence"] == pytest.approx(expected * params.UNVERIFIED_CONFIDENCE_FACTOR, abs=1e-9)
     assert cand["terrain_flatness"] == 1.0  # documented placeholder: no DEM yet
 
     # decision trace: ECC recovered the injected 2.6/-1.4 px shift, and PIF normalisation ran

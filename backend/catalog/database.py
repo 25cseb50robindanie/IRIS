@@ -124,6 +124,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             max_lat         REAL,
             alignment_quality REAL,  -- ECC rho, or ORB inlier ratio when ECC failed
             area_px         INTEGER,
+            area_ha         REAL,    -- area in hectares from the raster's pixel size (NULL before it was stored: 10 m assumed)
             mean_dndvi      REAL,    -- signed mean NDVI(B) - NDVI(A) inside the blob; NULL without a NIR band
             direction_evidence TEXT, -- JSON: dominant classes at each date, class shares, rule that fired
             sub_blobs       INTEGER, -- change blobs merged into this detection (1 = a single blob)
@@ -131,8 +132,74 @@ def init_schema(conn: sqlite3.Connection) -> None:
             centroid_lat    REAL,
             mgrs_ref        TEXT,    -- 10-digit MGRS reference of that centroid
             geometry        TEXT,    -- GeoJSON geometry (EPSG:4326) of the changed pixels; NULL before it was stored
+            seasonality_status TEXT, -- persistence filter: seasonal | anomalous | unverified; NULL = check not applicable
             created_at      TEXT DEFAULT (datetime('now'))
         );
+
+        -- Ablation: the same pair differenced with every suppression stage switched off (no masking, no
+        -- normalisation, no merging, no scoring), to show what the suppression stack removes.
+        -- Same columns as change_candidates; confidence is not computed here, so it may be NULL.
+        CREATE TABLE IF NOT EXISTS ablation_candidates (
+            candidate_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id          INTEGER NOT NULL REFERENCES jobs(job_id),
+            scene_a_id      TEXT NOT NULL,
+            scene_b_id      TEXT NOT NULL,
+            min_x           REAL NOT NULL,
+            min_y           REAL NOT NULL,
+            max_x           REAL NOT NULL,
+            max_y           REAL NOT NULL,
+            change_type     TEXT,
+            direction       TEXT,
+            confidence      REAL,
+            norm_rmse       REAL,
+            norm_cluster_dist REAL,
+            terrain_flatness REAL,
+            valid_coverage  REAL,
+            earliest_date   TEXT,
+            min_lon         REAL,
+            min_lat         REAL,
+            max_lon         REAL,
+            max_lat         REAL,
+            alignment_quality REAL,
+            area_px         INTEGER,
+            area_ha         REAL,
+            mean_dndvi      REAL,
+            direction_evidence TEXT,
+            sub_blobs       INTEGER,
+            centroid_lon    REAL,
+            centroid_lat    REAL,
+            mgrs_ref        TEXT,
+            geometry        TEXT,
+            seasonality_status TEXT,
+            is_ablation     BOOLEAN DEFAULT TRUE,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_ablation_job ON ablation_candidates(job_id);
+
+        -- Watchlist: locations the analyst keeps an eye on. Bounds are WGS84 lon/lat (the columns are named as the brief has them).
+        CREATE TABLE IF NOT EXISTS watchlist (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            name                 TEXT,
+            min_x                REAL,  -- min_lon
+            min_y                REAL,  -- min_lat
+            max_x                REAL,  -- max_lon
+            max_y                REAL,  -- max_lat
+            confidence_threshold REAL DEFAULT 0.5,
+            created_at           TEXT DEFAULT (datetime('now'))
+        );
+
+        -- A new detection on a watched location that reached its threshold; raised when the job that made it completes
+        CREATE TABLE IF NOT EXISTS watchlist_alerts (
+            alert_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            watchlist_id    INTEGER NOT NULL REFERENCES watchlist(id),
+            candidate_id    INTEGER NOT NULL REFERENCES change_candidates(candidate_id),
+            job_id          INTEGER NOT NULL REFERENCES jobs(job_id),
+            confidence      REAL,
+            created_at      TEXT DEFAULT (datetime('now')),
+            acknowledged_at TEXT,
+            UNIQUE(watchlist_id, candidate_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_watchlist_alerts_job ON watchlist_alerts(job_id);
 
         -- Analyst review decisions (audit trail)
         CREATE TABLE IF NOT EXISTS reviews (
@@ -173,6 +240,29 @@ def init_schema(conn: sqlite3.Connection) -> None:
             "centroid_lat": "REAL",
             "mgrs_ref": "TEXT",
             "geometry": "TEXT",
+            "seasonality_status": "TEXT",
+            "area_ha": "REAL",
+        },
+    )
+    # An ablation_candidates table may already exist with another layout (created by earlier code, so CREATE IF NOT EXISTS
+    # kept it): adopt it by adding whatever the ablation code writes and reads that it lacks
+    _ensure_columns(
+        cursor,
+        "ablation_candidates",
+        {
+            "min_lon": "REAL",
+            "min_lat": "REAL",
+            "max_lon": "REAL",
+            "max_lat": "REAL",
+            "area_px": "INTEGER",
+            "sub_blobs": "INTEGER",
+            "centroid_lon": "REAL",
+            "centroid_lat": "REAL",
+            "mgrs_ref": "TEXT",
+            "geometry": "TEXT",
+            "seasonality_status": "TEXT",
+            "area_ha": "REAL",
+            "is_ablation": "BOOLEAN DEFAULT 1",
         },
     )
     if _ensure_columns(cursor, "tiles", {"mgrs_ref": "TEXT"}):
@@ -459,14 +549,18 @@ def delete_scene_rows(conn: sqlite3.Connection, scene_id: str) -> Dict[str, int]
             "SELECT candidate_id FROM change_candidates WHERE scene_a_id = ? OR scene_b_id = ?", (scene_id, scene_id)
         ).fetchall()
     ]
-    counts["reviews"] = counts["change_candidates"] = 0
+    counts["reviews"] = counts["change_candidates"] = counts["watchlist_alerts"] = 0
     for i in range(0, len(cand_ids), 500):  # stay well under SQLite's variable limit
         chunk = cand_ids[i : i + 500]
         marks = ",".join("?" for _ in chunk)
+        counts["watchlist_alerts"] += conn.execute(f"DELETE FROM watchlist_alerts WHERE candidate_id IN ({marks})", chunk).rowcount
         counts["reviews"] += conn.execute(f"DELETE FROM reviews WHERE candidate_id IN ({marks})", chunk).rowcount
         counts["change_candidates"] += conn.execute(
             f"DELETE FROM change_candidates WHERE candidate_id IN ({marks})", chunk
         ).rowcount
+    counts["ablation_candidates"] = conn.execute(
+        "DELETE FROM ablation_candidates WHERE scene_a_id = ? OR scene_b_id = ?", (scene_id, scene_id)
+    ).rowcount
     counts["jobs"] = conn.execute(
         "DELETE FROM jobs WHERE scene_a_id = ? OR scene_b_id = ?", (scene_id, scene_id)
     ).rowcount

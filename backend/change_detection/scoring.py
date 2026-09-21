@@ -10,6 +10,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from rasterio.crs import CRS
 from rasterio.transform import Affine
 from rasterio.warp import transform_bounds
 from rasterio.windows import Window, bounds as window_bounds
@@ -25,6 +26,16 @@ def _clamp01(x: float) -> float:
     return float(min(1.0, max(0.0, x)))
 
 
+def pixel_area_ha(transform: Affine, crs: Optional[str]) -> Optional[float]:
+    """Hectares one pixel covers, or None when the grid is not in metres (a geographic CRS, or none)."""
+    try:
+        if crs and CRS.from_string(crs).is_projected:
+            return abs(transform.a * transform.e) / 10000.0
+    except Exception:
+        pass
+    return None
+
+
 def score_candidates(
     det: Detection,
     mutual: np.ndarray,
@@ -33,9 +44,15 @@ def score_candidates(
     crs: Optional[str],
     scene_a_id: str,
     scene_b_id: str,
+    cloud_trust: float = 1.0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Score every surviving blob. Returns (candidate rows ready for the catalog, trace figures)."""
+    """Score every surviving blob. Returns (candidate rows ready for the catalog, trace figures).
+
+    `cloud_trust` (1.0 unless a scene was only heuristically masked) scales the valid-coverage term: no pixel was removed
+    for a suspected cloud, so the doubt goes into the score instead.
+    """
     trace: Dict[str, Any] = {"terrain": "placeholder: flat (no DEM loaded)"}
+    pixel_ha = pixel_area_ha(transform, crs)
     if det.labels is None or det.keep is None or not det.keep.any():
         trace.update({"blobs_scored": 0, "dropped_insufficient_evidence": 0})
         return [], trace
@@ -94,6 +111,7 @@ def score_candidates(
             continue
 
         mean_dndvi = float(sum_dn[label] / cnt_dn[label]) if cnt_dn[label] > 0 else None
+        coverage = coverage * _clamp01(cloud_trust)  # stored too, so the breakdown still sums to the score
         w = params.CONFIDENCE_WEIGHTS
         confidence = _clamp01(
             w["alignment_quality"] * _clamp01(alignment_quality)
@@ -138,6 +156,7 @@ def score_candidates(
                 "valid_coverage": coverage,
                 "alignment_quality": _clamp01(alignment_quality),
                 "area_px": area,
+                "area_ha": None if pixel_ha is None else round(area * pixel_ha, 4),
                 "mean_dndvi": mean_dndvi,
             }
         )

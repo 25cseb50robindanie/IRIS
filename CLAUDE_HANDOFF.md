@@ -314,3 +314,128 @@ K-means threshold rises: keep fixture changes comparable in NIR magnitude.
   add the browser test scripts to the repo (e.g. `frontend/e2e/`).
 - Hard rules still apply (AGENTS.md): no network except localhost, no auth, bind 127.0.0.1, Electron
   `contextIsolation/nodeIntegration/sandbox` untouched, SQLite WAL + `BEGIN IMMEDIATE`, module boundaries.
+
+---
+
+## 10. Added after the handoff above: tabs, attribution, ablation, seasonal filter (2026-09-21)
+
+Everything below is uncommitted, like §0. Backend suite green; `npx vite build` green; the UI was also driven end to end in
+Chrome (puppeteer-core, scratch archive) and ablation/seasonal were run on a scratch copy of the real catalog.
+
+**Workspace.** `Sidebar` is now three tabs: `OverviewTab` (figures, pipeline, scene list; replaced `WorkspaceStatus`),
+`SearchTab` (tile results, Find Similar, similar changes, Attribution switch), `ChangeResults` (filters, cards, ablation).
+`SectionHeader.jsx` is gone. `App.jsx` owns `workspaceTab`; a query or Find Similar goes to Search, `openChange(id, source)`
+goes to Changes and scrolls to the card unless `source === "list"`. Each tab's scroll position is recorded in `Sidebar` and
+restored in a layout effect. Info popover (i) is in the Sidebar header. The map draws outlines only while the Changes tab is
+open (amber = full pipeline, click opens the change; red = ablation).
+
+**Find Similar.** `POST /api/search/similar` takes exactly one of `tile_id`, `faiss_id`, `candidate_id`. A candidate seed
+also returns `similar_changes`: other changes scored by their best-matching *after-date* tile (exact dot product against the
+seed vector, tiles of the seed's own tile excluded because they match trivially).
+
+**Attribution** (`embedding/attribution.py`, `POST /api/search/attribution`). Gradient-weighted last-layer CLS attention
+(Chefer GAE, one layer, no rollout), not the plain attention the brief called "simplest": plain CLS attention ignores the
+query, so every query would light the same patches. It falls back to raw attention (reported in `method`) if the gradient
+is degenerate. Implementation detail that matters: nn.MultiheadAttention's fused path exposes no weights and the ones it
+returns on request are a view outside the autograd graph, so a forward hook recomputes the last layer's attention by hand
+and returns the same output (asserted equal to the plain forward, 3e-6). The hook only acts on the thread that installed
+it, because embedding jobs share the model. ~0.1 s per tile on CPU. Patch-level (~320 m), not pixel-level.
+
+**Ablation** (`change_detection/ablation.py`, `catalog/ablation.py`, `api/ablation.py`). Raw NIR |B-A| -> K-means -> 3x3
+open/close -> components -> MMU; no SCL, no PIF, no alignment, no merging, no scoring (the "centroid below minimum magnitude"
+sanity gate is kept). Stores the largest `MAX_ABLATION_STORED` (5,000) blobs; the true total is in `job.details["ablation"]`.
+Outlines are simplified before storing (Douglas-Peucker at 20 m, holes dropped, at most 1,000 vertices each): unsimplified,
+the top 200 real blobs were 9.9 MB and the top 1,000 were 17 MB; now the top 1,000 (what the UI fetches) are 5.2 MB.
+Runs automatically after the import reports done (`trigger.run_ablations`, called from `_run_embedding_job`); a pair
+analysed earlier gets it from `POST /api/changes/ablation/run` (the UI's toggle does this itself) and polls
+`GET /api/changes/ablation/stats`. `full_count` = stored + `scoring.dropped_over_cap`: the storage cap is not suppression.
+On the real Jewar pair: 34,368 raw vs 15,618 found by the full pipeline (54.6% removed, not the 85.5% you get if you compare
+against the 5,000 that fit under the cap); 31 s, 2.1 GB peak RSS.
+**The real catalog already contained an `ablation_candidates` table from other code** (column `ablation_run`, its own
+indexes, 0 rows). `CREATE TABLE IF NOT EXISTS` kept it, so `init_schema` now adds any missing column to an existing table
+(`_ensure_columns`); covered by `test_an_existing_table_with_another_layout_is_adopted`.
+
+**Seasonal filter** (`change_detection/seasonal.py`, runs after merging + outlines, before storing). Eligible: type in
+`SEASONAL_TYPES` and |mean dNDVI| > `NDVI_DROP_SIG`. Priors: same sensor, earlier year, within 30 days of B's day-of-year,
+footprint covering the centroid. < 3 clear priors -> `unverified` (x0.85). Otherwise the after-scene's mean NDVI over the
+candidate's outline is compared with the priors' mean: drop <= 2 std (floor 0.05) -> `seasonal` (x0.5), else `anomalous`.
+That reading of "within 2 std devs of historical variation" is an interpretation; the brief was ambiguous. Stored confidence
+is now (four weighted terms) x `confidence_factor`, exposed in `/api/changes/{id}` and recorded in
+`direction_evidence.seasonality`. `annotate_job(job_id)` applies the filter to an already-analysed job without re-running the
+pair and is idempotent (skips rows that already have a status). Real pair: 680 eligible, all `unverified` (no same-season
+priors exist yet).
+`Hide seasonal` (default on) is `hide_seasonal=true` on `GET /api/changes` and a client-side filter for search matches.
+
+**Large-area merging, area in hectares, sort by area** were already built (§3); nothing changed there.
+
+**Tests added:** `test_ablation.py` (15), `test_seasonal.py` (20), `test_attribution.py` (8), Find Similar additions in
+`test_demo_features.py`. `s2_factory.Scenario` gained `clouds=[...]`. Two older tests were updated for the x0.85 factor
+(`test_change_api.py`, `test_change_detection.py`).
+
+**Open points.** Electron still has no Content-Security-Policy (secure-coding-standards asks for one); the attribution overlay
+uses a `data:` image, so a CSP must allow `img-src data:`. The banner sentence "removes N% of false alarms" is the brief's
+wording; raw detections are not all false alarms until the ablation is scored against labelled data (architecture.md,
+"Ablation is mandatory").
+
+---
+
+## 11. Added after §10: Landsat, generic rasters, evaluation report, watchlist, export filter (2026-09-22)
+
+Uncommitted, like §0 and §10. Backend suite green; `npx vite build` green; the UI was driven end to end in Chrome (seed archive
+in a short scratch path, scene B and a Landsat scene imported *through the UI*), and the schema migration was run on a scratch
+copy of the real catalog.
+
+**Landsat 8/9 Collection 2 L2** (`ingestion/landsat.py`; detection helpers in `loader.py`). Its own module rather than `loader.py`
+because it mirrors `safe.py`, which already imports `loader.py`. Folder or any one band file (`LC08_/LC09_L2SP_*`). It produces
+the same three rasters as Sentinel-2 *in Sentinel-2's conventions*, so change detection has no Landsat branch:
+reflectance is rewritten as (DN' - 1000) / 10000 (Landsat: DN * 2.75e-5 - 0.2), and QA_PIXEL (bit 3 cloud, 4 shadow, 5 snow,
+0 fill; dilated cloud and cirrus are NOT used, the brief named 3-5) is written as SCL class codes (9 / 3 / 11 / 0, 7 = clear)
+into the scene's `scl_path`. Invalid = cloud or shadow; snow is kept and flagged. Sensor is `landsat8` / `landsat9`; the
+same-sensor rule therefore also keeps Landsat 8 from pairing with Landsat 9. The trace and export name the mask `QA_PIXEL`.
+
+**Generic rasters** (`loader.py`: `infer_sensor_from_raster`, `heuristic_cloud_pct`, `convert_generic_to_cogs`). 3-4 bands at
+21-26 m (projected CRS only) -> `liss3`; a filename with LISS3 also gives `liss3` (this changed an old test that expected
+"bhuvan"). 4+ bands: an RGB display COG (the map and the embedding crops read the first three bands as R, G, B, so a raw
+4-band COG would show wrong colours) plus an analysis COG in change detection's band order. **LISS-III is G, R, NIR, SWIR**, so
+its analysis COG is [G, G, R, NIR] (green stands in for blue); every other 4+ band raster is assumed B, G, R, NIR. That band
+order is an assumption for unknown sensors. Heuristic mask: NDVI < 0.2 AND brightness above the scene's 75th percentile ->
+`cloud_pct`; it lowers CloudTrust and scales the confidence's valid-coverage term (`scoring.cloud_trust_factor`), and removes no
+pixel. Because the threshold is a *relative* percentile, a clear scene still flags roughly 1% and a bright bare-ground scene
+much more: a known weakness of the rule as specified. RGB-only: no masking, CloudTrust 1.0, warning logged.
+
+**Pixel size.** Areas were `area_px / 100` (10 m) everywhere; a Landsat pixel is 900 m^2. `change_candidates.area_ha` and
+`ablation_candidates.area_ha` now store hectares from the raster's pixel size; a row without one (stored earlier) falls back to
+px/100 in `catalog/changes.py` / `catalog/ablation.py`. The minimum mapping unit is still 100 **pixels** (9 ha on Landsat).
+
+**Evaluation instrumentation.** `instrumentation.PipelineTimer` (`time_stage`, plus `begin`/`end` for sequential phases). Used
+by the change pipeline (its phases) and by search / find-similar (model_load, query_encoding, faiss_search, change_matching,
+total), recorded per stage with p50/p95/p99. Ingestion stage times still come from the pipeline tracker, not the timer. The
+manifest kept its existing keys and gained the brief's layout beside them: `hardware.cpu/ram_gb/gpu` (gpu is a string,
+`gpu_detail` the old dict), `runs`, `storage.*_mb`, `index_stats`, `query_latency_ms`. Overview has a Download Report button.
+
+**Watchlist** (`catalog/watchlist.py`, `api/watchlist.py`). `watchlist` holds WGS84 boxes in columns named min_x..max_y as
+briefed. `POST /api/watchlist` takes `bounds` or `center` + `radius_m` (default 500 m); the map's right-click uses the latter.
+`finish_job` calls `raise_alerts_for_job` inside its own transaction, so every completed job is checked and a re-run replaces
+its alerts (`finish_job` deletes a job's alerts before its candidates: foreign keys). Alerts are for NEW detections only: a
+location pinned over something already found does not alert. `confidence >= threshold` on the final (seasonally adjusted)
+confidence. Acknowledgement (`POST /watchlist/alerts/{id}/acknowledge`, `/acknowledge`) is not in the brief but the Overview
+badge needs it. Capped at 500 locations. Frontend: `useWatchlist` polls every 4 s and toasts a fresh alert once.
+
+**Export.** `GET /api/export/changes?decision=all|confirmed|pending|rejected` (default all: every candidate, each with
+`analyst_decision`). `/api/changes` returns `review_counts` so the menu can show and disable options. The confirm/reject
+update in the list was already immediate (optimistic); a browser test now asserts it within 1.5 s.
+
+**Polish.** Search scope toggle in the search bar (default "Active scene only"; changing it re-runs the query). Toasts
+(`Toaster`, `App.notify`) for failed imports, searches, Find Similar, decisions, exports, watchlist actions, and a
+lost/regained backend connection (2 failed polls). The before/after view is 4x the box in total, as chosen in §3 (the brief
+says both "4x" and "2x padding each side", which would be 5x); say so if 5x is wanted (`DISPLAY_WINDOW_FACTOR`).
+`.gitignore` now ignores everything under `data/` except the three `.gitkeep` folders, but **`backend/data/eval_manifest.json`
+is tracked**: run `git rm --cached backend/data/eval_manifest.json` once to stop it showing as modified.
+
+**Tests added:** `test_landsat.py` (27: loader, QA bits, scaling, COGs, API, change detection, cross-sensor, generic and
+heuristic), `test_watchlist.py` (14), plus additions to `test_demo_features.py` (manifest layout, PipelineTimer, export
+filter) and `test_ingest.py`. `s2_factory` gained `make_landsat`, `make_generic`, `ingest_landsat_without_embedding`,
+`ingest_generic_without_embedding`.
+
+**Not verified.** No real Landsat or LISS-III file was available: everything above was built and tested on synthetic scenes
+with the real file layout and bit packing. Try one real Landsat 8 folder before relying on it.

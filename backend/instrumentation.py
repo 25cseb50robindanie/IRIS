@@ -20,10 +20,11 @@ import platform
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import numpy as np
 
@@ -39,6 +40,7 @@ INGEST_STAGE_NAMES = {
     "detect": "format_detection",
     "bands": "band_extraction",
     "scl": "scl_masking",
+    "qa": "qa_masking",
     "rgb": "rgb_composite",
     "cog": "cog_conversion",
     "crops": "crop_generation",
@@ -63,7 +65,7 @@ def _now() -> str:
 
 
 def _empty_state() -> Dict[str, Any]:
-    return {"ingestions": [], "change_detection": [], "query_samples_ms": {}}
+    return {"ingestions": [], "change_detection": [], "query_samples_ms": {}, "query_stage_samples_ms": {}}
 
 
 def _ensure_loaded() -> None:
@@ -80,6 +82,10 @@ def _ensure_loaded() -> None:
             _state["change_detection"] = list(old.get("change_detection", []))[-MAX_OPERATION_RECORDS:]
             _state["query_samples_ms"] = {
                 kind: list(v.get("samples_ms", []))[-MAX_LATENCY_SAMPLES:] for kind, v in old.get("queries", {}).items()
+            }
+            _state["query_stage_samples_ms"] = {
+                kind: {stage: list(x.get("samples_ms", []))[-MAX_LATENCY_SAMPLES:] for stage, x in v.get("stages_ms", {}).items()}
+                for kind, v in old.get("queries", {}).items()
             }
         except Exception:
             logger.warning("Could not read the existing evaluation manifest; starting a new one")
@@ -250,20 +256,57 @@ def _document(refresh_sections: bool, last_operation: str) -> Dict[str, Any]:
     if refresh_sections or not _cached_sections:
         _cached_sections["storage"] = storage_footprint()
         _cached_sections["index"] = index_stats()
+    hw = hardware()
+    storage = dict(_cached_sections["storage"])
+    for key, mb_key in (("cogs_bytes", "cogs_mb"), ("crops_bytes", "crops_mb"), ("faiss_index_bytes", "faiss_mb"), ("sqlite_bytes", "sqlite_mb")):
+        storage[mb_key] = round(storage[key] / 1024**2, 2)
+    index = _cached_sections["index"]
+    queries = {
+        kind: {
+            **_percentiles(samples),
+            "samples_ms": samples,
+            "stages_ms": {
+                stage: {**_percentiles(vals), "samples_ms": vals}
+                for stage, vals in _state["query_stage_samples_ms"].get(kind, {}).items()
+            },
+        }
+        for kind, samples in _state["query_samples_ms"].items()
+    }
+    text = queries.get(QUERY_TEXT, {})
+    runs = sorted(
+        [{"operation": "ingestion", **r} for r in _state["ingestions"]]
+        + [{"operation": "change_detection", **r} for r in _state["change_detection"]],
+        key=lambda r: r["recorded_at"],
+    )
+    gpu = hw.get("gpu") or {}
     return {
         "schema": "iris.eval_manifest/1",
         "generated_at": _now(),
         "last_operation": last_operation,
-        "hardware": hardware(),
+        "hardware": {
+            **hw,
+            # the short forms an evaluation report quotes
+            "cpu": hw.get("cpu_model"),
+            "ram_gb": hw.get("ram_total_gb"),
+            "gpu": gpu.get("name") or "none (CPU inference)",
+            "gpu_detail": gpu,
+        },
         "software": software(),
-        "storage": _cached_sections["storage"],
-        "index": _cached_sections["index"],
+        "runs": runs,  # every ingestion and change-detection job, oldest first, with its per-stage timings
+        "storage": storage,
+        "index": index,
+        "index_stats": {
+            "scenes": index["scenes"],
+            "tiles": index["tiles"],
+            "vectors": index["faiss_vectors"],
+            "change_candidates": index["change_candidates"],
+        },
+        "query_latency_ms": {k: text.get(k) for k in ("count", "p50_ms", "p95_ms", "p99_ms")} | {
+            "p50": text.get("p50_ms"), "p95": text.get("p95_ms"), "p99": text.get("p99_ms"),
+        },
         "ingestions": _state["ingestions"],
         "change_detection": _state["change_detection"],
-        "queries": {
-            kind: {**_percentiles(samples), "samples_ms": samples}
-            for kind, samples in _state["query_samples_ms"].items()
-        },
+        "queries": queries,
     }
 
 
@@ -332,14 +375,21 @@ def record_change_detection(
         logger.exception("Could not record change-detection timings")
 
 
-def record_query(kind: str, seconds: float) -> None:
-    """Latency of one query, from the request reaching the handler to the response being ready."""
+def record_query(kind: str, seconds: float, stages_ms: Optional[Dict[str, float]] = None) -> None:
+    """Latency of one query, from the request reaching the handler to the response being ready.
+
+    `stages_ms` (a PipelineTimer's stages) adds where the time went: query encoding, FAISS search, change matching.
+    """
     try:
         with _lock:
             _ensure_loaded()
             samples = _state["query_samples_ms"].setdefault(kind, [])
             samples.append(round(seconds * 1000.0, 1))
             del samples[:-MAX_LATENCY_SAMPLES]
+            for stage, ms in (stages_ms or {}).items():
+                stage_samples = _state["query_stage_samples_ms"].setdefault(kind, {}).setdefault(stage, [])
+                stage_samples.append(ms)
+                del stage_samples[:-MAX_LATENCY_SAMPLES]
             _commit(f"query:{kind}", refresh_sections=False)  # storage does not change with a query
     except Exception:
         logger.exception("Could not record query latency")
@@ -365,6 +415,49 @@ def manifest() -> Dict[str, Any]:
         except Exception:
             logger.exception("Could not write the evaluation manifest")
         return doc
+
+
+class PipelineTimer:
+    """Wall-clock milliseconds per named stage of one operation.
+
+        timer = PipelineTimer()
+        with timer.time_stage("cog_conversion"):
+            ...
+        timer.to_dict()   # {"cog_conversion": 812.4}
+
+    A stage timed twice adds up. For a run of phases that follow each other (a pipeline) `begin(name)` closes the previous
+    stage and opens the next, and `end()` closes the last. A stage that raises is still recorded.
+    """
+
+    def __init__(self) -> None:
+        self.stages: Dict[str, float] = {}
+        self._open: Optional[tuple] = None
+
+    def _record(self, name: str, started: float) -> None:
+        self.stages[name] = round(self.stages.get(name, 0.0) + (time.perf_counter() - started) * 1000.0, 1)
+
+    @contextmanager
+    def time_stage(self, name: str) -> Iterator[None]:
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._record(name, started)
+
+    def begin(self, name: str) -> None:
+        self.end()
+        self._open = (name, time.perf_counter())
+
+    def end(self) -> None:
+        if self._open is not None:
+            self._record(*self._open)
+            self._open = None
+
+    def total_ms(self) -> float:
+        return round(sum(self.stages.values()), 1)
+
+    def to_dict(self) -> Dict[str, float]:
+        return dict(self.stages)
 
 
 class Stopwatch:

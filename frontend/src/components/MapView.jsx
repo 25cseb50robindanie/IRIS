@@ -12,8 +12,78 @@ function removeCogLayers(map) {
   });
 }
 
+const boxRing = ([minx, miny, maxx, maxy]) => [
+  [minx, miny],
+  [maxx, miny],
+  [maxx, maxy],
+  [minx, maxy],
+  [minx, miny],
+];
+
+const WATCH_COLORS = { quiet: "#2563eb", alert: "#dc2626" }; // a pinned place, and one with a detection the analyst has not seen
+const LONG_PRESS_MS = 700;
+
+// A pin at the centre of each watched box and the box itself; `alert` marks the ones with an unseen detection
+function watchCollection(locations, alertIds) {
+  const features = [];
+  for (const loc of locations) {
+    const [minx, miny, maxx, maxy] = loc.bounds;
+    const alert = alertIds.has(loc.id);
+    features.push({
+      type: "Feature",
+      properties: { id: loc.id, alert },
+      geometry: { type: "Polygon", coordinates: [boxRing(loc.bounds)] },
+    });
+    features.push({
+      type: "Feature",
+      properties: { id: loc.id, alert },
+      geometry: { type: "Point", coordinates: [(minx + maxx) / 2, (miny + maxy) / 2] },
+    });
+  }
+  return { type: "FeatureCollection", features };
+}
+
+const OUTLINE_LAYERS = ["change-outline-fill", "change-outline-line"];
+const OUTLINE_COLORS = { normal: "#f59e0b", ablation: "#dc2626" }; // amber: the full pipeline; red: suppression off
+const ATTRIBUTION_OPACITY = 0.45; // the heatmap is a hint over the imagery, not a replacement for it
+
+
+// GeoJSON for the outlines: the traced shape where there is one, else the box
+function outlineCollection(items) {
+  return {
+    type: "FeatureCollection",
+    features: items.map((c) => ({
+      type: "Feature",
+      properties: { id: c.id },
+      geometry: c.geometry || { type: "Polygon", coordinates: [boxRing(c.bounds)] },
+    })),
+  };
+}
+
+/**
+ * The map. Besides the scene and the selected-tile box it draws, on request:
+ *   changeOutlines  {items: [{id, bounds, geometry?}], kind: "normal" | "ablation", selectedId}  outlines of changes
+ *   attribution     {url, coordinates}  the heatmap of where a query matched, over the selected tile
+ *   watchlist       the watched locations [{id, bounds}] drawn as pins, and alertWatchIds the ids with an unseen detection
+ * onOutlineClick(id) is called for a click on an outline (leave it out and outlines are not clickable);
+ * onWatchClick(id) for a click on a pin; onContextMenu({lng, lat, x, y}) for a right-click or long press;
+ * onBackgroundClick() for a click on anything else.
+ */
 const MapView = forwardRef(function MapView(
-  { currentScene, selectedResult, onMouseMove, onMapReady },
+  {
+    currentScene,
+    selectedResult,
+    onMouseMove,
+    onMapReady,
+    changeOutlines = null,
+    onOutlineClick = null,
+    attribution = null,
+    onBackgroundClick = null,
+    watchlist = [],
+    alertWatchIds = null,
+    onWatchClick = null,
+    onContextMenu = null,
+  },
   ref
 ) {
   const mapContainer = useRef(null);
@@ -22,6 +92,19 @@ const MapView = forwardRef(function MapView(
   // When the scene changes *because* the analyst picked a search result in it, the result's own fly-to must win
   const selectedResultRef = useRef(null);
   selectedResultRef.current = selectedResult;
+  // Handlers and state the map's own event listeners (registered once) must always see the latest of
+  const outlineClickRef = useRef(null);
+  outlineClickRef.current = onOutlineClick;
+  const backgroundClickRef = useRef(null);
+  backgroundClickRef.current = onBackgroundClick;
+  const outlinesActive = useRef(false);
+  outlinesActive.current = Boolean(changeOutlines && changeOutlines.items.length);
+  const attributionRef = useRef(null);
+  attributionRef.current = attribution;
+  const watchClickRef = useRef(null);
+  watchClickRef.current = onWatchClick;
+  const contextMenuRef = useRef(null);
+  contextMenuRef.current = onContextMenu;
   // The scene layer can only be added once the map has loaded; a scene resumed from the catalog
   // on startup may arrive before that, so the layer effect must re-run when the map becomes ready.
   const [mapReady, setMapReady] = useState(false);
@@ -118,11 +201,112 @@ const MapView = forwardRef(function MapView(
         });
       }
 
+      // Outlines of detected changes; the selected one is drawn heavier
+      map.addSource("change-outline-source", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addLayer({
+        id: "change-outline-fill",
+        type: "fill",
+        source: "change-outline-source",
+        paint: { "fill-color": OUTLINE_COLORS.normal, "fill-opacity": 0.1 },
+      });
+      map.addLayer({
+        id: "change-outline-line",
+        type: "line",
+        source: "change-outline-source",
+        paint: { "line-color": OUTLINE_COLORS.normal, "line-width": 1.5 },
+      });
+      map.addLayer({
+        id: "change-outline-selected",
+        type: "line",
+        source: "change-outline-source",
+        filter: ["==", ["get", "id"], -1],
+        paint: { "line-color": "#ffffff", "line-width": 3 },
+      });
+
+      // Watched locations: the box, and a pin at its centre (red while a detection there has not been seen)
+      map.addSource("watch-source", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addLayer({
+        id: "watch-box",
+        type: "line",
+        source: "watch-source",
+        filter: ["==", ["geometry-type"], "Polygon"],
+        paint: {
+          "line-color": ["case", ["get", "alert"], WATCH_COLORS.alert, WATCH_COLORS.quiet],
+          "line-width": 1.5,
+          "line-dasharray": [3, 2],
+        },
+      });
+      map.addLayer({
+        id: "watch-pin-halo",
+        type: "circle",
+        source: "watch-source",
+        filter: ["==", ["geometry-type"], "Point"],
+        paint: { "circle-radius": 13, "circle-color": ["case", ["get", "alert"], WATCH_COLORS.alert, WATCH_COLORS.quiet], "circle-opacity": 0.2 },
+      });
+      map.addLayer({
+        id: "watch-pin",
+        type: "circle",
+        source: "watch-source",
+        filter: ["==", ["geometry-type"], "Point"],
+        paint: {
+          "circle-radius": 6,
+          "circle-color": ["case", ["get", "alert"], WATCH_COLORS.alert, WATCH_COLORS.quiet],
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 2,
+        },
+      });
+
+      // The browser's own menu has nothing to offer on a map
+      const canvas = map.getCanvasContainer();
+      canvas.addEventListener("contextmenu", (ev) => ev.preventDefault());
+      const at = (point) => {
+        const ll = map.unproject(point);
+        return { lng: ll.lng, lat: ll.lat, x: point.x, y: point.y };
+      };
+      map.on("contextmenu", (e) => contextMenuRef.current && contextMenuRef.current(at(e.point)));
+      // Long press does the same on a touch screen
+      let press = null;
+      const cancel = () => {
+        clearTimeout(press);
+        press = null;
+      };
+      canvas.addEventListener("touchstart", (ev) => {
+        if (ev.touches.length !== 1) return cancel();
+        const rect = canvas.getBoundingClientRect();
+        const point = { x: ev.touches[0].clientX - rect.left, y: ev.touches[0].clientY - rect.top };
+        press = setTimeout(() => contextMenuRef.current && contextMenuRef.current(at(point)), LONG_PRESS_MS);
+      });
+      canvas.addEventListener("touchmove", cancel);
+      canvas.addEventListener("touchend", cancel);
+      canvas.addEventListener("touchcancel", cancel);
+
       if (onMapReady) onMapReady(map);
       setMapReady(true);
     });
 
+    map.on("click", (e) => {
+      if (map.getLayer("watch-pin")) {
+        const pins = map.queryRenderedFeatures(e.point, { layers: ["watch-pin", "watch-pin-halo"] });
+        if (pins.length) {
+          if (watchClickRef.current) watchClickRef.current(pins[0].properties.id);
+          return;
+        }
+      }
+      if (map.getLayer("change-outline-fill")) {
+        const hits = map.queryRenderedFeatures(e.point, { layers: OUTLINE_LAYERS });
+        if (hits.length) {
+          if (outlineClickRef.current) outlineClickRef.current(hits[0].properties.id);
+          return; // a click on an outline is not a click away
+        }
+      }
+      if (backgroundClickRef.current) backgroundClickRef.current();
+    });
+
     map.on("mousemove", (e) => {
+      if (outlinesActive.current && map.getLayer("change-outline-fill")) {
+        const over = outlineClickRef.current && map.queryRenderedFeatures(e.point, { layers: OUTLINE_LAYERS }).length > 0;
+        map.getCanvas().style.cursor = over ? "pointer" : "";
+      }
       if (onMouseMove) {
         onMouseMove({
           lng: e.lngLat.lng,
@@ -196,6 +380,52 @@ const MapView = forwardRef(function MapView(
     }
   }, [selectedResult]);
 
+  // Outlines of the changes being looked at: amber for the full pipeline, red with the suppression off
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map || !mapReady) return;
+    const source = map.getSource("change-outline-source");
+    if (!source) return;
+    const kind = changeOutlines?.kind === "ablation" ? "ablation" : "normal";
+    source.setData(outlineCollection(changeOutlines?.items || []));
+    for (const id of OUTLINE_LAYERS) {
+      map.setPaintProperty(id, id.endsWith("fill") ? "fill-color" : "line-color", OUTLINE_COLORS[kind]);
+    }
+    map.setFilter("change-outline-selected", ["==", ["get", "id"], changeOutlines?.selectedId ?? -1]);
+  }, [changeOutlines, mapReady]);
+
+  // The watched locations
+  const watchSignature = JSON.stringify([watchlist.map((w) => [w.id, w.bounds]), alertWatchIds ? [...alertWatchIds].sort() : []]);
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map || !mapReady) return;
+    const source = map.getSource("watch-source");
+    if (source) source.setData(watchCollection(watchlist, alertWatchIds || new Set()));
+  }, [watchSignature, mapReady]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Attribution heatmap over the selected tile. It sits above the scene and below the outlines.
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map || !mapReady) return undefined;
+    const clear = () => {
+      if (map.getLayer("attribution-layer")) map.removeLayer("attribution-layer");
+      if (map.getSource("attribution-source")) map.removeSource("attribution-source");
+    };
+    clear();
+    if (!attribution) return undefined;
+    map.addSource("attribution-source", { type: "image", url: attribution.url, coordinates: attribution.coordinates });
+    map.addLayer(
+      {
+        id: "attribution-layer",
+        type: "raster",
+        source: "attribution-source",
+        paint: { "raster-opacity": ATTRIBUTION_OPACITY, "raster-fade-duration": 300, "raster-resampling": "linear" },
+      },
+      "crop-highlight-fill"
+    );
+    return clear;
+  }, [attribution, mapReady]);
+
   // Update raster layer when currentScene changes
   useEffect(() => {
     const map = mapInstance.current;
@@ -242,6 +472,7 @@ const MapView = forwardRef(function MapView(
           },
           beforeLayerId
         );
+        if (map.getLayer("attribution-layer")) map.moveLayer("attribution-layer", beforeLayerId);
 
         // Use bounds directly from tilejson or bounds_wgs84
         if (currentScene.bounds_wgs84 && currentScene.bounds_wgs84.length === 4) {

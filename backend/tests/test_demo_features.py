@@ -121,6 +121,41 @@ def test_export_carries_the_review_and_falls_back_to_the_box_for_old_candidates(
     assert re.fullmatch(r"43[A-Z]{3}\d{10}", feature["properties"]["mgrs"])  # derived from the box centre instead
 
 
+def test_export_can_be_narrowed_by_decision_and_every_feature_says_what_the_analyst_decided(tmp_path):
+    box2 = (300, 360, 100, 180)
+    a = ingest_without_embedding(make_safe(tmp_path / "src", NAME_A, Scenario(date="2024-01-10", noise_seed=1, landcover=[(*CLEARED, "vegetation"), (*box2, "vegetation")])))
+    b = ingest_without_embedding(make_safe(tmp_path / "src", NAME_B, Scenario(date="2024-02-14", noise_seed=2, landcover=[(*CLEARED, "bare"), (*box2, "bare")])))
+    run_change_detection(a, b)
+    client = TestClient(app)
+    ids = [c["candidate_id"] for c in client.get("/api/changes").json()["candidates"]]
+    assert len(ids) == 2
+    assert client.post(f"/api/changes/{ids[0]}/review", json={"decision": "confirmed"}).status_code == 200
+
+    def exported(**params):
+        resp = client.get("/api/export/changes", params=params)
+        assert resp.status_code == 200, resp.text
+        return resp, resp.json()
+
+    resp, everything = exported()  # the default is everything, confirmed or not
+    assert everything["decision_filter"] == "all" and everything["feature_count"] == 2
+    assert {f["id"]: f["properties"]["analyst_decision"] for f in everything["features"]} == {ids[0]: "confirmed", ids[1]: "pending"}
+    assert re.fullmatch(r'attachment; filename="iris_changes_\d{8}\.geojson"', resp.headers["content-disposition"])
+
+    resp, confirmed = exported(decision="confirmed")
+    assert [f["id"] for f in confirmed["features"]] == [ids[0]] and confirmed["decision_filter"] == "confirmed"
+    assert re.fullmatch(r'attachment; filename="iris_changes_confirmed_\d{8}\.geojson"', resp.headers["content-disposition"])
+    assert [f["id"] for f in exported(decision="pending")[1]["features"]] == [ids[1]]
+    assert exported(decision="rejected")[1]["features"] == []
+
+    client.post(f"/api/changes/{ids[0]}/review", json={"decision": "rejected"})  # the latest decision wins
+    assert [f["id"] for f in exported(decision="rejected")[1]["features"]] == [ids[0]]
+    assert exported(decision="confirmed")[1]["features"] == []
+    assert client.get("/api/export/changes", params={"decision": "maybe"}).status_code == 422
+
+    counts = client.get("/api/changes").json()["review_counts"]
+    assert counts == {"pending": 1, "confirmed": 0, "rejected": 1}
+
+
 def test_export_can_be_limited_and_is_empty_without_candidates(tmp_path):
     client = cleared_pair(tmp_path)
     assert client.get("/api/export/changes", params={"min_confidence": 0.999}).json()["feature_count"] == 0
@@ -158,13 +193,16 @@ def test_detail_lists_the_decision_trace_in_pipeline_order(tmp_path):
     client = cleared_pair(tmp_path)
     d = client.get(f"/api/changes/{only_candidate(client)['candidate_id']}").json()
     lines = {line["key"]: line["text"] for line in d["processing_details"]}
-    assert [line["key"] for line in d["processing_details"]] == ["masking", "alignment", "normalisation", "detection", "direction", "evidence"]
+    assert [line["key"] for line in d["processing_details"]] == [
+        "masking", "alignment", "normalisation", "detection", "direction", "evidence", "seasonality",
+    ]
     assert re.fullmatch(r"SCL-based, CloudTrust A: \d\.\d\d, CloudTrust B: \d\.\d\d", lines["masking"])
     assert lines["alignment"] == "Same MGRS tile (T43PHM) — grid verified by definition"
     assert re.fullmatch(r"PIF robust regression, [\d,]+ anchor pixels, gain: \d\.\d\d, offset: -?\d+\.\d", lines["normalisation"])
     assert re.fullmatch(r"NIR difference → K-Means K=2, change centroid magnitude: \d+\.\d", lines["detection"])
     assert lines["direction"] == "Disappearance — dominant class A: vegetation, dominant class B: bare"
     assert re.fullmatch(r"ΔNDVI: -\d\.\d\d", lines["evidence"])
+    assert lines["seasonality"].startswith("Unverified — 0 clear same-season prior observations (needs 3)")
 
 
 def test_a_candidate_without_direction_evidence_says_so(tmp_path):
@@ -247,6 +285,75 @@ def test_find_similar_from_a_change_candidate_seeds_with_its_after_tile(archive)
     assert len(resp.json()["semantic_results"]) == 7
 
 
+def test_find_similar_accepts_a_faiss_id_as_the_seed(archive):
+    conn = init_connection()
+    try:
+        tile_id, faiss_id = conn.execute(
+            "SELECT tile_id, faiss_id FROM tiles WHERE scene_id = ? AND tile_id LIKE '%crop_00224_00224'", (NAME_B,)
+        ).fetchone()
+    finally:
+        conn.close()
+    by_tile = archive.post("/api/search/similar", json={"tile_id": tile_id}).json()
+    by_id = archive.post("/api/search/similar", json={"faiss_id": faiss_id})
+    assert by_id.status_code == 200, by_id.text
+    body = by_id.json()
+    assert body["similar_to"]["tile_id"] == tile_id
+    assert body["semantic_results"] == by_tile["semantic_results"]  # the same vector, the same neighbours
+    assert tile_id not in [r["tile_id"] for r in body["semantic_results"]]  # the query vector itself is excluded
+
+    assert archive.post("/api/search/similar", json={"faiss_id": 10**6}).status_code == 404
+    assert archive.post("/api/search/similar", json={"faiss_id": -1}).status_code == 422
+    assert archive.post("/api/search/similar", json={"faiss_id": faiss_id, "tile_id": tile_id}).status_code == 422
+
+
+SECOND_BOX = (260, 330, 260, 340)  # a second vegetation -> bare change, in another 224 px crop
+
+
+@pytest.fixture
+def archive_two_changes(tmp_path):
+    client = TestClient(app)
+    both = [(*TILE_BOX, "vegetation"), (*SECOND_BOX, "vegetation")]
+    ingest_via_api(client, tmp_path, NAME_A, Scenario(date="2024-01-10", noise_seed=1, landcover=both))
+    ingest_via_api(
+        client, tmp_path, NAME_B, Scenario(date="2024-02-14", noise_seed=2, landcover=[(*TILE_BOX, "bare"), (*SECOND_BOX, "bare")])
+    )
+    return client
+
+
+def test_a_change_seed_returns_the_other_changes_that_look_like_it(archive_two_changes):
+    client = archive_two_changes
+    cands = client.get("/api/changes").json()["candidates"]
+    assert len(cands) == 2
+    first, second = sorted(cands, key=lambda c: c["bounds"][0])
+
+    resp = client.post("/api/search/similar", json={"candidate_id": first["candidate_id"]})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["label"] == f"Similar to change #{first['candidate_id']}"
+    assert body["similar_to"]["candidate_id"] == first["candidate_id"]
+
+    (found,) = body["similar_changes"]  # the seed change itself is not among them
+    assert found["candidate_id"] == second["candidate_id"] != first["candidate_id"]
+    assert 0.0 < found["similarity"] <= 1.0
+    assert found["after_tile_id"].startswith(NAME_B) and found["after_tile_id"] != body["similar_to"]["tile_id"]
+    assert found["bounds"] == second["bounds"] and found["review_status"] == "pending"
+    assert (found["change_type"], found["direction"]) == (second["change_type"], second["direction"])
+    assert found["mgrs"] and found["area_px"] == second["area_px"]
+
+    # the tile results are still there, and a tile seed has no "similar changes"
+    assert len(body["semantic_results"]) == 7
+    seed_tile = body["similar_to"]["tile_id"]
+    assert client.post("/api/search/similar", json={"tile_id": seed_tile}).json()["similar_changes"] == []
+
+
+def test_similar_changes_come_best_first_and_respect_top_k(archive_two_changes):
+    client = archive_two_changes
+    cid = client.get("/api/changes").json()["candidates"][0]["candidate_id"]
+    assert len(client.post("/api/search/similar", json={"candidate_id": cid, "top_k": 1}).json()["similar_changes"]) == 1
+    sims = [c["similarity"] for c in client.post("/api/search/similar", json={"candidate_id": cid}).json()["similar_changes"]]
+    assert sims == sorted(sims, reverse=True)
+
+
 def test_find_similar_rejects_bad_seeds(archive):
     assert archive.post("/api/search/similar", json={}).status_code == 422
     assert archive.post("/api/search/similar", json={"tile_id": "a_b", "candidate_id": 1}).status_code == 422
@@ -302,6 +409,66 @@ def test_the_evaluation_manifest_records_stages_storage_index_latency_and_hardwa
     # the same document is kept on disk, updated after every operation
     on_disk = json.loads(Path("data/eval_manifest.json").read_text(encoding="utf-8"))
     assert on_disk["index"] == m["index"] and len(on_disk["ingestions"]) == 2
+
+
+def test_the_manifest_has_the_layout_the_evaluation_report_names(archive):
+    archive.post("/api/search", json={"query": "cleared land", "top_k": 5})
+    archive.post("/api/search", json={"query": "forest", "top_k": 5})
+    m = archive.get("/api/eval/manifest").json()
+
+    hw = m["hardware"]
+    assert hw["cpu"] == hw["cpu_model"] and hw["ram_gb"] == hw["ram_total_gb"] > 0 and isinstance(hw["gpu"], str) and hw["gpu"]
+    # "runs": every ingestion and change-detection job, oldest first, with its per-stage timings
+    kinds = [r["operation"] for r in m["runs"]]
+    assert kinds.count("ingestion") == 2 and kinds.count("change_detection") == 1
+    assert [r["recorded_at"] for r in m["runs"]] == sorted(r["recorded_at"] for r in m["runs"])
+    assert all("stages_s" in r and r["total_s"] is not None for r in m["runs"])
+
+    st = m["storage"]
+    assert st["cogs_mb"] >= 0 and st["crops_mb"] > 0 and st["faiss_mb"] > 0 and st["sqlite_mb"] > 0
+    assert st["total_mb"] == pytest.approx(st["cogs_mb"] + st["crops_mb"] + st["faiss_mb"] + st["sqlite_mb"], abs=0.02)
+    assert m["index_stats"] == {"scenes": 2, "tiles": 8, "vectors": 8, "change_candidates": 1}
+
+    lat = m["query_latency_ms"]
+    assert lat["count"] == 2 and 0 < lat["p50"] <= lat["p95"] <= lat["p99"]
+
+    # where a search spends its time
+    stages = m["queries"]["text_search"]["stages_ms"]
+    assert {"query_encoding", "faiss_search", "change_matching", "total"} <= set(stages)
+    assert stages["total"]["count"] == 2 and stages["total"]["p50_ms"] >= stages["query_encoding"]["p50_ms"] > 0
+
+
+def test_pipeline_timer_records_stages_in_milliseconds():
+    import time
+
+    import instrumentation
+
+    timer = instrumentation.PipelineTimer()
+    with timer.time_stage("cog_conversion"):
+        time.sleep(0.03)
+    with timer.time_stage("crop_generation"):
+        pass
+    with timer.time_stage("cog_conversion"):  # a stage timed twice adds up
+        time.sleep(0.02)
+    stages = timer.to_dict()
+    assert list(stages) == ["cog_conversion", "crop_generation"]
+    assert 45 <= stages["cog_conversion"] < 400 and stages["crop_generation"] < 20
+    assert timer.total_ms() == pytest.approx(sum(stages.values()), abs=0.2)
+    assert timer.to_dict() is not timer.stages  # a copy: the report cannot change the timer
+
+    with pytest.raises(RuntimeError):
+        with timer.time_stage("failing"):
+            raise RuntimeError("boom")
+    assert "failing" in timer.to_dict()  # a stage that raises is still recorded
+
+    seq = instrumentation.PipelineTimer()
+    seq.begin("masking")
+    time.sleep(0.01)
+    seq.begin("alignment")  # closes masking
+    time.sleep(0.01)
+    seq.end()
+    seq.end()  # closing twice is harmless
+    assert list(seq.to_dict()) == ["masking", "alignment"] and all(v >= 8 for v in seq.to_dict().values())
 
 
 def test_the_manifest_is_updated_by_each_operation_without_being_asked(tmp_path):

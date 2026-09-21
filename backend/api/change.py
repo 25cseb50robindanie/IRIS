@@ -32,11 +32,13 @@ class CandidateSummary(BaseModel):
     direction: Optional[str] = None
     confidence: float
     area_px: Optional[int] = None
+    area_ha: Optional[float] = None  # hectares, from the raster's pixel size
     mean_dndvi: Optional[float] = None
     review_status: str  # pending | confirmed | rejected
     mgrs: Optional[str] = None  # 10-digit MGRS reference of the detection's centroid
     centroid: Optional[List[float]] = None  # [lon, lat] of the changed pixels (None before it was traced)
     sub_blobs: int = 1  # change blobs merged into this detection
+    seasonality_status: Optional[str] = None  # seasonal | anomalous | unverified; None when the persistence check did not apply
 
 
 class AnalysedArea(BaseModel):
@@ -68,6 +70,7 @@ class CandidateList(BaseModel):
     filtered_by_confidence: bool
     candidates: List[CandidateSummary]
     pairs: List[PairInfo]
+    review_counts: Dict[str, int] = {"pending": 0, "confirmed": 0, "rejected": 0}  # stored candidates in scope, by decision
     thresholds: Dict[str, Any] = {}  # what 'no significant change' was measured against
     area: AnalysedArea = AnalysedArea()  # where the analysed pairs overlap
 
@@ -109,8 +112,10 @@ class CandidateDetail(CandidateSummary):
     processing_details: List[TraceLine] = []  # the decision trace as sentences, in pipeline order
     scene_a: SceneRef
     scene_b: SceneRef
-    confidence_breakdown: Dict[str, ConfidenceTerm]
+    confidence_breakdown: Dict[str, ConfidenceTerm]  # the four weighted terms; their sum x confidence_factor = confidence
+    confidence_factor: float = 1.0  # what the seasonal persistence filter multiplied the sum by (1.0: it did not apply)
     direction_evidence: Optional[Dict[str, Any]] = None  # what each date looked like, and the rule that named the change
+    seasonality: Optional[Dict[str, Any]] = None  # the persistence filter's evidence (prior years, mean and spread of NDVI)
     terrain_is_placeholder: bool = True
     decision_trace: Dict[str, Any] = {}
     reviews: List[ReviewEntry] = []
@@ -150,11 +155,13 @@ def _summary(c: Dict[str, Any]) -> CandidateSummary:
         direction=c["direction"],
         confidence=c["confidence"],
         area_px=c["area_px"],
+        area_ha=c["area_ha"],
         mean_dndvi=c["mean_dndvi"],
         review_status=c["review_status"],
         mgrs=c.get("mgrs_ref"),
         centroid=[c["centroid_lon"], c["centroid_lat"]] if c.get("centroid_lon") is not None else None,
         sub_blobs=c.get("sub_blobs") or 1,
+        seasonality_status=c.get("seasonality_status"),
     )
 
 
@@ -194,6 +201,7 @@ def list_changes(
     types: Optional[str] = Query(default=None, description="Comma-separated change types to include"),
     directions: Optional[str] = Query(default=None, description="Comma-separated directions to include"),
     sort: Literal["confidence", "area", "date"] = "confidence",
+    hide_seasonal: bool = Query(default=False, description="Leave out candidates the persistence filter calls seasonal"),
     limit: int = Query(default=params.DISPLAY_CAP_PER_JOB, ge=1, le=1000, description="Cap per pair"),
 ) -> CandidateList:
     """Change candidates with the analyst's filters applied, plus the list of analysed pairs.
@@ -227,6 +235,8 @@ def list_changes(
             if wanted or wanted_directions
             else stored
         )
+        if hide_seasonal:
+            after_types = [r for r in after_types if r["seasonality_status"] != "seasonal"]
         rows = [r for r in after_types if r["confidence"] >= min_confidence]
         area = analysed_area(conn, [j for j in scope if j["status"] == store.JOB_COMPLETED])
         per_job_stored: Dict[int, int] = {}
@@ -279,6 +289,7 @@ def list_changes(
         filtered_by_confidence=excluded > 0,
         candidates=[_summary(r) for r in taken],
         pairs=pairs,
+        review_counts={k: sum(1 for r in stored if r["review_status"] == k) for k in ("pending", "confirmed", "rejected")},
         thresholds=DETECTION_THRESHOLDS,
         area=AnalysedArea(**area),
     )
@@ -350,7 +361,9 @@ def get_change(candidate_id: int) -> CandidateDetail:
         scene_a=scene_a,
         scene_b=scene_b,
         confidence_breakdown=breakdown,
+        confidence_factor=float(((cand.get("direction_evidence") or {}).get("seasonality") or {}).get("confidence_factor", 1.0)),
         direction_evidence=cand.get("direction_evidence"),
+        seasonality=(cand.get("direction_evidence") or {}).get("seasonality"),
         decision_trace=job_details,
         reviews=[ReviewEntry(**r) for r in reviews],
     )

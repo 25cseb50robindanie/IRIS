@@ -3,7 +3,7 @@ import { X, Check, Ban, Loader2, AlertCircle, ChevronRight } from "lucide-react"
 import { boundsMgrs, formatLatLon, spacedMgrs } from "../mgrs";
 import CompareMap from "./CompareMap";
 
-import { changeLabel, describeDirection, DIRECTION_ICONS, hectares } from "./changeKinds";
+import { changeLabel, describeDirection, DIRECTION_ICONS, hectares, SEASONALITY } from "./changeKinds";
 
 const TERM_LABELS = {
   alignment_quality: "Alignment quality",
@@ -121,6 +121,8 @@ export default function ChangeComparison({ detail, loading, error, onClose, onRe
   const mgrsRef = detail.mgrs || boundsMgrs(bounds);
   const traceLines = detail.processing_details || [];
   const DirectionIcon = DIRECTION_ICONS[detail.direction || "unclassified"];
+  const season = SEASONALITY[detail.seasonality_status];
+  const factor = detail.confidence_factor ?? 1;
 
   return (
     <div className="absolute inset-0 z-20 flex flex-col bg-white">
@@ -157,6 +159,11 @@ export default function ChangeComparison({ detail, loading, error, onClose, onRe
             <span className={`px-1.5 py-0.5 rounded-[3px] text-[10px] font-medium ${STATUS_STYLE[detail.review_status]}`}>
               {detail.review_status}
             </span>
+            {season && (
+              <span className={`px-1.5 py-0.5 rounded-[3px] text-[10px] font-medium ${season.style}`} title={season.hint} data-testid="detail-seasonality">
+                {season.label}
+              </span>
+            )}
           </div>
           <div className="mt-1 text-neutral-600">
             Confidence <span className="font-mono font-semibold text-neutral-900">{pct(detail.confidence)}</span>
@@ -165,7 +172,7 @@ export default function ChangeComparison({ detail, loading, error, onClose, onRe
             )}
             {detail.area_px ? (
               <span className="ml-2 font-mono text-neutral-500" data-testid="detail-area">
-                {hectares(detail.area_px)}
+                {hectares(detail.area_px, detail.area_ha)}
               </span>
             ) : null}
           </div>
@@ -202,6 +209,12 @@ export default function ChangeComparison({ detail, loading, error, onClose, onRe
               </div>
             ))}
           </div>
+          {factor !== 1 && (
+            <div className="mt-1.5 flex items-center space-x-2 text-neutral-600" data-testid="seasonal-factor">
+              <span className="w-28">Seasonal filter</span>
+              <span className="font-mono text-neutral-700">×{factor.toFixed(2)}</span>
+            </div>
+          )}
           {detail.terrain_is_placeholder && (
             <div className="mt-1 text-[10px] text-neutral-400">Terrain is a placeholder (no DEM loaded yet).</div>
           )}

@@ -33,6 +33,13 @@ release/
 *.hdf
 *.SAFE
 
+# Data directories: whatever the app writes there (catalog, index, evaluation manifest, logs) is never committed.
+# Only the .gitkeep placeholders of the three working folders stay.
+**/data/*
+!**/data/cogs/
+!**/data/staging/
+!**/data/uploads/
+
 # Data Directories
 **/data/uploads/*
 !**/data/uploads/.gitkeep

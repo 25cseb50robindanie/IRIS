@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import Toolbar from "./components/Toolbar";
 import MapView from "./components/MapView";
 import Sidebar from "./components/Sidebar";
@@ -6,7 +6,12 @@ import SearchBar from "./components/SearchBar";
 import StatusBar from "./components/StatusBar";
 import ChangeComparison from "./components/ChangeComparison";
 import { API_BASE } from "./api";
-import { DEFAULT_FILTERS } from "./components/ChangeResults";
+import { applyMatchFilters, DEFAULT_FILTERS } from "./components/ChangeResults";
+import useAblation from "./useAblation";
+import useWatchlist from "./useWatchlist";
+import Toaster from "./components/Toaster";
+import MapContextMenu from "./components/MapContextMenu";
+import { downloadFromApi } from "./download";
 
 const EMBED_TERMINAL_STATES = new Set(["ready", "failed", "not_embedded"]);
 const EMBED_POLL_MS = 750;
@@ -18,6 +23,10 @@ const CHANGES_POLL_MS = 4000;
 const PIPELINE_POLL_MS = 1000;
 const PIPELINE_MAX_MISSES = 5;
 const FILTER_DEBOUNCE_MS = 200;
+const WATCH_RADIUS_M = 500; // a place pinned from the map is watched within this distance of the pin
+const CONNECTION_FAILURES = 2; // polls in a row that must fail before the analyst is told the backend is gone
+const TOAST_MS = { error: 9000, alert: 12000, success: 4000, info: 5000 };
+const errorText = (err, fallback) => (err instanceof TypeError ? "Could not reach the IRIS backend." : err?.message || fallback);
 
 // The analyst's change filters as query parameters. Filtering, the per-pair cap and counts are the server's job.
 function changesQuery(f) {
@@ -28,6 +37,7 @@ function changesQuery(f) {
     if (on.length < Object.keys(f[group]).length) q.set(group, on.join(","));
   }
   q.set("sort", f.sort === "match" ? "confidence" : f.sort); // "best match" only exists for search results
+  if (f.hideSeasonal) q.set("hide_seasonal", "true");
   if (f.jobId != null) q.set("job_id", String(f.jobId));
   return q.toString();
 }
@@ -76,16 +86,52 @@ export default function App() {
     changeMeta: null,
     hasSearched: false,
     searchedScene: null,
+    searchedAll: false, // the last search covered every scene
     error: null,
     selectedResult: null,
     similarTo: null, // {tile_id, label} while the semantic results are "tiles like this one" rather than a query's matches
+    similarChanges: [], // for a change seed: the other changes whose after-date imagery looks like its own
     busy: "search", // what isSearching is waiting for: "search" (a query) or "similar" (Find Similar)
     errorTitle: "Search failed",
   });
   const searchStateRef = useRef(null);
   searchStateRef.current = searchState;
-  const [searchCount, setSearchCount] = useState(0); // bumps per search so the Workspace re-applies its defaults
-  const [similarKey, setSimilarKey] = useState(0); // bumps per Find Similar so the Workspace opens its results
+
+  // Messages the analyst must not miss. Every failure of a request ends up here or inline where it happened, never nowhere.
+  const [toasts, setToasts] = useState([]);
+  const toastSeq = useRef(0);
+  const dismissToast = useCallback((id) => setToasts((all) => all.filter((t) => t.id !== id)), []);
+  const notify = useCallback(
+    ({ kind = "info", title, message }) => {
+      setToasts((all) => {
+        if (all.some((t) => t.title === title && t.message === message)) return all; // the same thing twice is one thing
+        toastSeq.current += 1;
+        const id = toastSeq.current;
+        setTimeout(() => dismissToast(id), TOAST_MS[kind] ?? 5000);
+        return [...all.slice(-3), { id, kind, title, message }];
+      });
+    },
+    [dismissToast]
+  );
+
+  // Watched locations and the alerts the backend raised on them; the map's right-click menu
+  const watch = useWatchlist(notify);
+  const [mapMenu, setMapMenu] = useState(null); // {x, y, lng, lat}
+  const [focusedWatchId, setFocusedWatchId] = useState(null);
+  const [reportBusy, setReportBusy] = useState(false);
+  // Search covers the scene on the map unless the analyst widens it
+  const [searchAllScenes, setSearchAllScenes] = useState(false);
+
+  // Workspace tabs. A query moves the analyst to Search, a clicked change to Changes; each tab keeps its own scroll.
+  const [workspaceTab, setWorkspaceTab] = useState("overview");
+  const [scrollTarget, setScrollTarget] = useState(null); // {id, n}: a change candidate to bring into view in Changes
+
+  // Attribution: the heatmap of where in the selected tile the query matched (on by default)
+  const [attributionEnabled, setAttributionEnabled] = useState(true);
+  const [attribution, setAttribution] = useState(null); // {url, coordinates} once the backend has answered
+
+  // Ablation: the same pair with every suppression stage off, and how it compares with the full pipeline
+  const [ablationOn, setAblationOn] = useState(false);
 
   // Imported scenes (toolbar switcher) and the step-by-step progress of the import in flight
   const [scenes, setScenes] = useState([]);
@@ -111,6 +157,7 @@ export default function App() {
 
       const fileName = selectedPath.split(/[\/\\]/).pop();
       setIngestState({ status: "ingesting", fileName });
+      setWorkspaceTab("overview"); // where the import's steps are shown
       setError(null);
       const pid = newPipelineId();
       setPipeline(null);
@@ -138,7 +185,8 @@ export default function App() {
       refreshScenes().catch(() => {});
     } catch (err) {
       console.error("Ingestion failed:", err);
-      setError(err.message || "Failed to ingest image");
+      setError(errorText(err, "Failed to ingest image"));
+      notify({ kind: "error", title: "Import failed", message: errorText(err, "Failed to ingest image") });
       setIngestState({ status: "error", fileName: "" });
     }
   };
@@ -213,9 +261,25 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    let failures = 0;
+    let lost = false;
     const tick = () => {
       if (cancelled || document.hidden) return;
-      refreshChanges().catch(() => {});
+      refreshChanges()
+        .then(() => {
+          failures = 0;
+          if (lost) {
+            lost = false;
+            notify({ kind: "success", message: "Reconnected to the IRIS backend." });
+          }
+        })
+        .catch(() => {
+          failures += 1;
+          if (failures >= CONNECTION_FAILURES && !lost) {
+            lost = true;
+            notify({ kind: "error", title: "Lost connection to the IRIS backend", message: "Results on screen may be out of date. It will reconnect by itself once the backend is running." });
+          }
+        });
     };
     tick();
     const timer = setInterval(tick, CHANGES_POLL_MS);
@@ -223,7 +287,7 @@ export default function App() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [refreshChanges]);
+  }, [refreshChanges, notify]);
 
   // Re-query when the analyst moves a filter (debounced so dragging the slider is one request, not fifty)
   useEffect(() => {
@@ -264,7 +328,13 @@ export default function App() {
     return res.json();
   }, []);
 
-  const openChange = async (id) => {
+  // source: where the click came from. A click on a card in the Changes list is already there; a click anywhere else
+  // (the map, Find Similar's list) brings the analyst to that card in the Changes tab.
+  const openChange = async (id, source = "list") => {
+    if (source !== "list") {
+      setWorkspaceTab("changes");
+      setScrollTarget({ id, n: Date.now() });
+    }
     setSelectedChangeId(id);
     setChangeDetail(null);
     setChangeError(null);
@@ -272,7 +342,8 @@ export default function App() {
     try {
       setChangeDetail(await loadChangeDetail(id));
     } catch (err) {
-      setChangeError(err.message || "Could not load candidate");
+      setChangeError(errorText(err, "Could not load candidate"));
+      notify({ kind: "error", title: "Could not open the change", message: errorText(err, "Could not load candidate") });
     } finally {
       setChangeLoading(false);
     }
@@ -310,6 +381,7 @@ export default function App() {
       }
     } catch (err) {
       setReviewStatus(id, previous);
+      notify({ kind: "error", title: "Decision not saved", message: `${errorText(err, "Could not save the decision")} The list has been put back as it was.` });
       throw err;
     }
     try {
@@ -391,8 +463,11 @@ export default function App() {
       changeMeta: null,
       hasSearched: false,
       selectedResult: null,
+      similarTo: null,
+      similarChanges: [],
     }));
     setChangeView("all");
+    setWorkspaceTab((tab) => (tab === "search" ? "overview" : tab)); // the results it showed no longer exist
   };
 
   // Toolbar: switch the map to another imported scene
@@ -491,7 +566,7 @@ export default function App() {
   }
 
   // silent: refresh the results in place (no spinner, no map movement, the analyst's selection and panel state stay)
-  const handleSearch = async (queryText, { silent = false } = {}) => {
+  const handleSearch = async (queryText, { silent = false, all = searchAllScenes } = {}) => {
     if (!queryText.trim() || searchDisabledReason) return;
 
     if (!silent) {
@@ -505,7 +580,7 @@ export default function App() {
         selectedResult: null,
       }));
     }
-    const scopeScene = currentSceneRef.current?.scene_id || null;
+    const scopeScene = all ? null : currentSceneRef.current?.scene_id || null;
 
     try {
       const response = await fetch(`${API_BASE}/api/search`, {
@@ -533,12 +608,14 @@ export default function App() {
         changeResults: data.change_results || [],
         changeStatus: data.change_status,
         changeMeta: data.change_meta,
+        similarChanges: silent ? prev.similarChanges : [],
         hasSearched: true,
         searchedScene: scopeScene,
+        searchedAll: all,
         selectedResult: silent ? prev.selectedResult : null,
       }));
       if (silent) return;
-      setSearchCount((n) => n + 1);
+      setWorkspaceTab("search");
       setChangeView("search");
       setChangeFilters((f) => ({ ...f, sort: "match" }));
 
@@ -550,6 +627,7 @@ export default function App() {
         return;
       }
       console.error("Semantic search failed:", err);
+      notify({ kind: "error", title: "Search failed", message: errorText(err, "Failed to execute search") });
       setSearchState((prev) => ({
         ...prev,
         isSearching: false,
@@ -558,7 +636,7 @@ export default function App() {
         changeStatus: null,
         changeMeta: null,
         hasSearched: false,
-        error: err.message || "Failed to execute search",
+        error: errorText(err, "Failed to execute search"),
       }));
     }
   };
@@ -591,7 +669,7 @@ export default function App() {
   // Find Similar: the seed's own embedding is the query (image-to-image), and its neighbours replace the semantic results
   const handleFindSimilar = async ({ tileId = null, candidateId = null }) => {
     setSearchState((prev) => ({ ...prev, isSearching: true, busy: "similar", error: null, errorTitle: "Find Similar failed" }));
-    setSimilarKey((n) => n + 1); // open the Semantic Results section now, so the spinner and any error are seen
+    setWorkspaceTab("search"); // so the spinner, the results and any error are seen
     try {
       const response = await fetch(`${API_BASE}/api/search/similar`, {
         method: "POST",
@@ -615,18 +693,132 @@ export default function App() {
         isSearching: false,
         results,
         similarTo: { tile_id: data.similar_to.tile_id, label: data.label },
+        similarChanges: data.similar_changes || [],
         selectedResult: null,
       }));
       if (results.length > 0) showResult(results[0]);
     } catch (err) {
       console.error("Find Similar failed:", err);
       const unreachable = err instanceof TypeError; // fetch itself failed: nothing answered
+      notify({ kind: "error", title: "Find Similar failed", message: unreachable ? "Could not reach the IRIS backend." : err.message || "Find Similar failed" });
       setSearchState((prev) => ({
         ...prev,
         isSearching: false,
         error: unreachable ? "Could not reach the IRIS backend." : err.message || "Find Similar failed",
       }));
     }
+  };
+
+  // Heatmap of where the query matched inside the selected tile. It is an enhancement: if the backend cannot make one,
+  // the result is still selected and simply has no overlay. Not shown for Find Similar, which has no text query.
+  const selectedTile = searchState.selectedResult?.tile_id;
+  const attributionQuery = searchState.similarTo ? "" : searchState.query;
+  useEffect(() => {
+    if (!attributionEnabled || !selectedTile || !attributionQuery) {
+      setAttribution(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setAttribution(null);
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/search/attribution`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: attributionQuery, tile_id: selectedTile }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (cancelled) return;
+        const [minx, miny, maxx, maxy] = data.bounds_wgs84;
+        setAttribution({
+          url: `data:image/png;base64,${data.heatmap_base64}`,
+          // top-left, top-right, bottom-right, bottom-left; the tile's own corners where known (UTM tiles are slightly rotated)
+          coordinates: data.corners_wgs84?.length === 4 ? data.corners_wgs84 : [[minx, maxy], [maxx, maxy], [maxx, miny], [minx, miny]],
+        });
+      } catch (err) {
+        console.warn("Attribution heatmap unavailable:", err);
+        notify({ kind: "info", message: "The attribution heatmap could not be made for this tile; the result itself is unaffected." });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [attributionEnabled, selectedTile, attributionQuery, notify]);
+
+  // The pair the ablation is about: the pair chosen in the Changes tab, else the most recent analysed one
+  const completedPairs = changes.pairs.filter((p) => p.status === "completed");
+  const ablationSource = completedPairs.find((p) => p.job_id === changeFilters.jobId) || completedPairs[0] || null;
+  const ablationPair = useMemo(
+    () => (ablationSource ? { a: ablationSource.scene_a_id, b: ablationSource.scene_b_id } : null),
+    [ablationSource?.scene_a_id, ablationSource?.scene_b_id] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const ablationData = useAblation(ablationPair, ablationOn);
+  useEffect(() => {
+    if (ablationData.error) notify({ kind: "error", title: "Ablation", message: ablationData.error });
+  }, [ablationData.error, notify]);
+
+  // Pin the place under a right-click. The backend then checks every finished analysis against it.
+  const watchHere = async ({ lng, lat }) => {
+    const ok = await watch.add({ center: [lng, lat], radius_m: WATCH_RADIUS_M });
+    if (ok) setMapMenu(null);
+  };
+  const alertWatchIds = useMemo(() => new Set(watch.alerts.filter((a) => !a.acknowledged_at).map((a) => a.watchlist_id)), [watch.alerts]);
+  const focusWatch = (loc) => {
+    setFocusedWatchId(loc.id);
+    mapRef.current?.flyToBounds(loc.bounds);
+  };
+  // A pin was clicked: show it in the watchlist
+  const watchPinClicked = (id) => {
+    setWorkspaceTab("overview");
+    setFocusedWatchId(id);
+  };
+  // An alert is opened from the watchlist: it counts as seen, and its change opens in the before/after view
+  const openAlert = (alert) => {
+    if (!alert.acknowledged_at) watch.acknowledge(alert.alert_id);
+    openChange(alert.candidate_id, "map");
+  };
+  const downloadReport = async () => {
+    setReportBusy(true);
+    try {
+      await downloadFromApi(`${API_BASE}/api/eval/manifest`, "iris_eval_manifest.json");
+      notify({ kind: "success", message: "Evaluation report saved." });
+    } catch (err) {
+      notify({ kind: "error", title: "Report failed", message: errorText(err, "Could not build the report") });
+    } finally {
+      setReportBusy(false);
+    }
+  };
+
+  const toggleAblation = () => {
+    if (!ablationOn) {
+      closeChange(); // the before/after view would cover the map, where the raw detections are drawn
+      mapRef.current?.fitBounds(); // the whole scene: the flood of raw detections is the point
+    }
+    setAblationOn((on) => !on);
+  };
+
+  // Outlines on the map while the Changes tab is open: amber for the full pipeline (click one to open it), red for the
+  // raw detections with suppression off
+  const searchViewActive = changeView === "search" && searchState.hasSearched;
+  const outlines = useMemo(() => {
+    if (workspaceTab !== "changes") return null;
+    if (ablationOn) {
+      if (!ablationData.list) return null;
+      return {
+        kind: "ablation",
+        selectedId: null,
+        items: ablationData.list.candidates.map((c) => ({ id: c.candidate_id, bounds: c.bounds, geometry: c.geometry })),
+      };
+    }
+    const shown = searchViewActive ? applyMatchFilters(searchState.changeResults, changeFilters) : changes.candidates;
+    return { kind: "normal", selectedId: selectedChangeId, items: shown.map((c) => ({ id: c.candidate_id, bounds: c.bounds })) };
+  }, [workspaceTab, ablationOn, ablationData.list, searchViewActive, searchState.changeResults, changeFilters, changes.candidates, selectedChangeId]);
+
+  const changeSearchScope = (all) => {
+    setSearchAllScenes(all);
+    const q = searchStateRef.current;
+    if (q.hasSearched && q.query) handleSearch(q.query, { all }); // the results on screen were for the other scope
   };
 
   return (
@@ -654,7 +846,16 @@ export default function App() {
             currentScene={currentScene}
             selectedResult={searchState.selectedResult}
             onMouseMove={setMousePos}
+            changeOutlines={outlines}
+            onOutlineClick={ablationOn ? null : (id) => openChange(id, "map")}
+            attribution={attribution}
+            onBackgroundClick={() => setAttribution(null)}
+            watchlist={watch.locations}
+            alertWatchIds={alertWatchIds}
+            onWatchClick={watchPinClicked}
+            onContextMenu={setMapMenu}
           />
+          <MapContextMenu menu={mapMenu} onWatch={watchHere} onClose={() => setMapMenu(null)} busy={watch.busy} />
           {selectedChangeId !== null && (
             <ChangeComparison
               detail={changeDetail}
@@ -666,6 +867,9 @@ export default function App() {
           )}
         </div>
         <Sidebar
+          activeTab={workspaceTab}
+          onTabChange={setWorkspaceTab}
+          scrollTarget={scrollTarget}
           ingestState={ingestState}
           currentScene={currentScene}
           scenes={scenes}
@@ -673,6 +877,17 @@ export default function App() {
           catalog={catalog}
           catalogError={catalogError}
           error={error}
+          pipeline={pipeline}
+          onDismissPipeline={dismissPipeline}
+          onSelectScene={switchToScene}
+          watch={watch}
+          focusedWatchId={focusedWatchId}
+          onFocusWatch={focusWatch}
+          onOpenAlert={openAlert}
+          onDownloadReport={downloadReport}
+          reportBusy={reportBusy}
+          onNotify={notify}
+          searchScope={{ all: searchState.searchedAll, label: searchState.searchedAll ? "all scenes" : "active scene" }}
           searchError={searchState.error}
           searchErrorTitle={searchState.errorTitle}
           busyWith={searchState.busy}
@@ -682,8 +897,9 @@ export default function App() {
           selectedTileId={searchState.selectedResult?.tile_id}
           onSelectResult={handleSelectResult}
           similarTo={searchState.similarTo}
-          similarKey={similarKey}
+          similarChanges={searchState.similarChanges}
           onFindSimilar={handleFindSimilar}
+          attribution={{ enabled: attributionEnabled, onToggle: setAttributionEnabled }}
           search={{
             hasSearched: searchState.hasSearched,
             query: searchState.query,
@@ -692,7 +908,6 @@ export default function App() {
             meta: searchState.changeMeta,
             sceneId: searchState.searchedScene,
           }}
-          searchCount={searchCount}
           changes={changes}
           changeJobs={changeJobs}
           changeFilters={changeFilters}
@@ -701,8 +916,14 @@ export default function App() {
           onChangeView={changeViewTo}
           selectedChangeId={selectedChangeId}
           onOpenChange={openChange}
-          pipeline={pipeline}
-          onDismissPipeline={dismissPipeline}
+          ablation={{
+            on: ablationOn,
+            onToggle: toggleAblation,
+            available: Boolean(ablationPair),
+            stats: ablationData.stats,
+            list: ablationData.list,
+            error: ablationData.error,
+          }}
         />
       </div>
 
@@ -711,7 +932,12 @@ export default function App() {
         onSearch={handleSearch}
         isSearching={searchState.isSearching}
         disabledReason={searchDisabledReason}
+        searchAllScenes={searchAllScenes}
+        onScopeChange={changeSearchScope}
+        sceneLabel={currentScene ? `${currentScene.acquisition_date} · ${currentScene.sensor}` : null}
       />
+
+      <Toaster toasts={toasts} onDismiss={dismissToast} />
 
       {/* 4. Bottom Status Bar */}
       <StatusBar

@@ -18,7 +18,7 @@ def _scene_mask(details: Dict[str, Any], which: str) -> Dict[str, Any]:
 
 def _masking_source(details: Dict[str, Any]) -> str:
     a, b = _scene_mask(details, "scene_a").get("source"), _scene_mask(details, "scene_b").get("source")
-    names = {"scl": "SCL", "data_mask": "data_mask"}
+    names = {"scl": "SCL", "qa_pixel": "QA_PIXEL", "heuristic": "heuristic", "data_mask": "data_mask"}
     if a and a == b:
         return names.get(a, a)
     if a or b:
@@ -66,8 +66,13 @@ def trace_lines(details: Dict[str, Any], cand: Dict[str, Any]) -> List[Dict[str,
     a, b = _scene_mask(details, "scene_a"), _scene_mask(details, "scene_b")
     trust = f"CloudTrust A: {_fmt(a.get('cloud_trust'))}, CloudTrust B: {_fmt(b.get('cloud_trust'))}"
     src_a, src_b = a.get("source"), b.get("source")
+    described = {
+        "scl": "SCL-based",
+        "qa_pixel": "QA_PIXEL-based",
+        "heuristic": "Heuristic (no QA band: CloudTrust reduced, no pixel removed)",
+    }
     if src_a and src_a == src_b:
-        add("masking", "Masking", f"{'SCL-based' if src_a == 'scl' else 'Data-mask based (no SCL available)'}, {trust}")
+        add("masking", "Masking", f"{described.get(src_a, 'Data-mask based (no QA band available)')}, {trust}")
     elif src_a or src_b:
         add("masking", "Masking", f"A: {src_a or 'unknown'}, B: {src_b or 'unknown'}, {trust}")
 
@@ -135,6 +140,27 @@ def trace_lines(details: Dict[str, Any], cand: Dict[str, Any]) -> List[Dict[str,
         add("direction", "Direction", "Not classified (analysed before direction classification, or without a NIR band)")
     if cand.get("mean_dndvi") is not None:
         add("evidence", "Evidence", f"ΔNDVI: {cand['mean_dndvi']:.2f}")
+
+    # Seasonal persistence filter, only for candidates it applied to
+    status = cand.get("seasonality_status")
+    if status:
+        s = (ev or {}).get("seasonality") or {}
+        clear = s.get("priors_clear", 0)
+        if status == "unverified":
+            text = (
+                f"Unverified — {clear} clear same-season prior observation{'s' if clear != 1 else ''} "
+                f"(needs {params.SEASONAL_MIN_PRIORS}); confidence ×{params.UNVERIFIED_CONFIDENCE_FACTOR}"
+            )
+        else:
+            spread = (
+                f"NDVI {_fmt(s.get('current_ndvi'), 2)} against a same-season mean of {_fmt(s.get('prior_mean_ndvi'), 2)} "
+                f"(±{_fmt(s.get('prior_std_ndvi'), 2)}) over {clear} prior years"
+            )
+            if status == "seasonal":
+                text = f"Seasonal — {spread}; within {params.SEASONAL_SIGMAS:g} std devs, confidence ×{params.SEASONAL_CONFIDENCE_FACTOR}"
+            else:
+                text = f"Anomalous — {spread}; drop exceeds {params.SEASONAL_SIGMAS:g} std devs, confidence unchanged"
+        add("seasonality", "Seasonality", text)
     return lines
 
 

@@ -28,6 +28,7 @@ LABELS: Dict[str, str] = {
     "detect": "Detecting format",
     "bands": "Extracting bands (B02, B03, B04, B08)",
     "scl": "Reading SCL band",
+    "qa": "Decoding QA_PIXEL mask",
     "rgb": "Building RGB composite",
     "cog": "Converting to COG",
     "crops": "Generating embedding crops",
@@ -37,6 +38,7 @@ LABELS: Dict[str, str] = {
     "change": "Running change detection",
 }
 SAFE_STEPS = ["bands", "scl", "rgb", "cog", "crops", "embed", "index", "overlap", "change"]
+LANDSAT_STEPS = ["bands", "qa", "rgb", "cog", "crops", "embed", "index", "overlap", "change"]
 SINGLE_FILE_STEPS = ["cog", "crops", "embed", "index", "overlap", "change"]
 
 

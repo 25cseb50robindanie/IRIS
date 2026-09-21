@@ -63,7 +63,9 @@ def test_candidate_detail_has_scenes_breakdown_and_trace(client_with_changes):
 
     breakdown = d["confidence_breakdown"]
     assert set(breakdown) == {"alignment_quality", "cluster_distance", "terrain_flatness", "valid_coverage"}
-    assert sum(t["contribution"] for t in breakdown.values()) == pytest.approx(d["confidence"], abs=1e-6)
+    # the four terms sum to the score, times whatever the seasonal filter applied (a clearance with no history: x0.85)
+    assert d["seasonality_status"] == "unverified" and d["confidence_factor"] == 0.85
+    assert sum(t["contribution"] for t in breakdown.values()) * d["confidence_factor"] == pytest.approx(d["confidence"], abs=1e-6)
     assert breakdown["alignment_quality"]["weight"] == 0.35 and breakdown["terrain_flatness"]["weight"] == 0.15
     assert d["terrain_is_placeholder"] is True
 

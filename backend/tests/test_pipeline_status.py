@@ -124,7 +124,7 @@ def test_single_file_import_has_no_safe_only_steps(tmp_path):
     client.post("/api/ingest", json={"file_path": str(tif), "pipeline_id": "import-plain-01"})
     snap = client.get("/api/pipeline/import-plain-01").json()
     assert [s["key"] for s in snap["steps"]] == ["detect", "cog", "crops", "embed", "index", "overlap", "change"]
-    assert snap["steps"][0]["detail"].endswith("raster detected")
+    assert "raster detected" in snap["steps"][0]["detail"] and "(sentinel2)" in snap["steps"][0]["detail"]  # the sensor is named
 
 
 def test_failed_import_marks_the_step_and_ends_the_pipeline(tmp_path):

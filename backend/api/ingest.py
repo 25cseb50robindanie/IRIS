@@ -11,15 +11,16 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 from pydantic import BaseModel, Field
 
 from catalog.database import get_scene_tile_count, init_connection, init_schema, insert_tiles_batch, upsert_scene
-from api.pipeline_status import PIPELINE_ID_RE, SAFE_STEPS, SINGLE_FILE_STEPS, new_pipeline_id, pipeline_tracker
-from change_detection.trigger import Reporter, schedule_change_detection
+from api.pipeline_status import LANDSAT_STEPS, PIPELINE_ID_RE, SAFE_STEPS, SINGLE_FILE_STEPS, new_pipeline_id, pipeline_tracker
+from change_detection.trigger import Reporter, run_ablations, schedule_change_detection
 import instrumentation
 from embedding import progress as stages
 from embedding.crop import extract_crops
 from embedding.embedder import CHECKPOINT_MISSING_MSG, RemoteCLIPEmbedder, find_checkpoint
 from embedding.index import get_vector_store
 from embedding.progress import embedding_progress
-from ingestion.loader import convert_to_cog, inspect_raster, io_path
+from ingestion.landsat import build_landsat_cogs, inspect_landsat_product, open_landsat_product
+from ingestion.loader import convert_generic_to_cogs, heuristic_cloud_pct, inspect_raster, io_path
 from ingestion.safe import build_sentinel2_cogs, inspect_safe_product, open_safe_product
 from mgrs_ref import bounds_centre_mgrs
 
@@ -37,7 +38,7 @@ class IngestRequest(BaseModel):
     """Payload for scene ingestion."""
     file_path: str = Field(
         ...,
-        description="Absolute path to a satellite image file, or to a Sentinel-2 L2A .SAFE folder",
+        description="Absolute path to a satellite image file, a Sentinel-2 L2A .SAFE folder, or a Landsat 8/9 Collection 2 L2 scene",
     )
     pipeline_id: Optional[str] = Field(
         default=None,
@@ -58,10 +59,10 @@ class IngestResponse(BaseModel):
     bounds_wgs84: List[float]  # [min_lon, min_lat, max_lon, max_lat] in EPSG:4326
     tiles_count: int = 0
     embedding_status: str = stages.QUEUED  # poll GET /api/status/{scene_id} for progress
-    product_type: str = "single_file"  # "sentinel2_safe" when a .SAFE folder was imported
-    analysis_cog_path: Optional[str] = None  # 4-band B02/B03/B04/B08 COG (SAFE only)
-    scl_path: Optional[str] = None  # SCL resampled to 10 m (SAFE only)
-    cloud_pct: Optional[float] = None  # % cloud/shadow/cirrus from the SCL (SAFE only)
+    product_type: str = "single_file"  # "sentinel2_safe", "landsat_c2" or "single_file"
+    analysis_cog_path: Optional[str] = None  # 4-band blue/green/red/NIR COG (SAFE, Landsat, and generic rasters with a NIR band)
+    scl_path: Optional[str] = None  # class mask: Sentinel-2 SCL, or Landsat QA_PIXEL decoded to SCL codes
+    cloud_pct: Optional[float] = None  # % cloud/shadow: from the SCL / QA_PIXEL, or a heuristic estimate for generic rasters
     pipeline_id: Optional[str] = None  # poll GET /api/pipeline/{id} until its state is done or failed
 
 
@@ -133,10 +134,15 @@ def _ingest(payload: IngestRequest, background_tasks: BackgroundTasks, pid: str)
             detail=f"File not found: {file_path}",
         )
 
-    # A folder must be a Sentinel-2 L2A product (.SAFE, or a folder containing one); anything else is a
-    # single raster file and takes the original flow.
+    # A Landsat Collection 2 scene (a folder of band files, or one of them) is read by its own loader. Any other folder
+    # must be a Sentinel-2 L2A product (.SAFE, or a folder containing one); anything else is a single raster file.
     product = None
-    if probe.is_dir():
+    landsat = None
+    try:
+        landsat = open_landsat_product(file_path)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid Landsat product: {e}")
+    if landsat is None and probe.is_dir():
         try:
             product = open_safe_product(file_path)
         except ValueError as e:
@@ -147,12 +153,15 @@ def _ingest(payload: IngestRequest, background_tasks: BackgroundTasks, pid: str)
         if product is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This folder does not contain a Sentinel-2 L2A product (MTD_MSIL2A.xml not found)",
+                detail="This folder does not contain a Sentinel-2 L2A or Landsat Collection 2 L2 product",
             )
 
     # 1. Inspect raster and capability detection
     try:
-        metadata = inspect_safe_product(product) if product else inspect_raster(file_path)
+        if landsat:
+            metadata = inspect_landsat_product(landsat)
+        else:
+            metadata = inspect_safe_product(product) if product else inspect_raster(file_path)
     except FileNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -170,30 +179,45 @@ def _ingest(payload: IngestRequest, background_tasks: BackgroundTasks, pid: str)
             detail="Error inspecting raster capabilities",
         )
 
-    pipeline_tracker.complete(pid, "detect", "Sentinel-2 L2A detected" if product else f"{metadata.driver} raster detected")
-    pipeline_tracker.plan(pid, SAFE_STEPS if product else SINGLE_FILE_STEPS)
+    if landsat:
+        detected = f"Landsat {landsat.sensor[-1]} Collection 2 L2 detected"
+    elif product:
+        detected = "Sentinel-2 L2A detected"
+    else:
+        detected = f"{metadata.driver} raster detected ({metadata.sensor})"
+    pipeline_tracker.complete(pid, "detect", detected)
+    pipeline_tracker.plan(pid, LANDSAT_STEPS if landsat else SAFE_STEPS if product else SINGLE_FILE_STEPS)
 
     # 2. Convert to COG(s): display + analysis + SCL for a .SAFE product, a single COG otherwise
     analysis_rel: Optional[str] = None
     scl_rel: Optional[str] = None
     cloud_pct: Optional[float] = None
     try:
-        if product:
-            outputs = build_sentinel2_cogs(product, on_stage=_stage_reporter(pid))
+        if landsat or product:
+            outputs = (
+                build_landsat_cogs(landsat, on_stage=_stage_reporter(pid))
+                if landsat
+                else build_sentinel2_cogs(product, on_stage=_stage_reporter(pid))
+            )
             cog_path = outputs.display_cog
             analysis_rel = f"{COG_DIR}/{outputs.analysis_cog.name}"
             scl_rel = f"{COG_DIR}/{outputs.scl_cog.name}"
             cloud_pct = outputs.cloud_pct
         else:
             pipeline_tracker.begin(pid, "cog")
-            cog_path = convert_to_cog(file_path, metadata)
+            generic = convert_generic_to_cogs(file_path, metadata)
+            cog_path = generic.display_cog
+            if generic.analysis_cog is not None:
+                analysis_rel = f"{COG_DIR}/{generic.analysis_cog.name}"
+            # No QA band: an estimate that lowers CloudTrust, never a mask (RGB-only rasters get none)
+            cloud_pct = heuristic_cloud_pct(file_path, metadata.sensor)
             pipeline_tracker.complete(pid, "cog")
     except ValueError as e:
-        if not product:
+        if not (product or landsat):
             raise
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid Sentinel-2 product: {e}",
+            detail=f"Invalid {'Landsat' if landsat else 'Sentinel-2'} product: {e}",
         )
     except Exception as e:
         logger.exception("Failed to convert image to COG")
@@ -254,7 +278,7 @@ def _ingest(payload: IngestRequest, background_tasks: BackgroundTasks, pid: str)
         bounds_wgs84=metadata.bounds_wgs84,
         tiles_count=0,
         embedding_status=stages.QUEUED,
-        product_type="sentinel2_safe" if product else "single_file",
+        product_type="landsat_c2" if landsat else "sentinel2_safe" if product else "single_file",
         analysis_cog_path=analysis_rel,
         scl_path=scl_rel,
         cloud_pct=cloud_pct,
@@ -348,8 +372,9 @@ def _run_embedding_job(cog_path: Path, scene_id: str, pid: Optional[str] = None)
         # Pair the scene with overlapping same-sensor scenes and run change detection. It never needs the
         # embeddings, so a failed embedding does not block it, and its failure must not undo the embedding.
         reporter = _PipelineReporter(pid)
+        results = []
         try:
-            schedule_change_detection(scene_id, reporter)
+            results = schedule_change_detection(scene_id, reporter)
         except Exception:
             logger.exception("Change detection trigger failed for scene %s", scene_id)
             pipeline_tracker.fail_active(pid, "Change detection could not run", end=False)
@@ -369,6 +394,12 @@ def _run_embedding_job(cog_path: Path, scene_id: str, pid: Optional[str] = None)
             "completed_with_errors" if embed_error else "completed",
             tiles,
         )
+
+        # After the import has reported done: what the same pair looks like with every suppression stage switched off
+        try:
+            run_ablations(results)
+        except Exception:
+            logger.exception("Ablation could not run for scene %s", scene_id)
 
 
 def _embed_scene(cog_path: Path, scene_id: str, pid: Optional[str] = None) -> int:

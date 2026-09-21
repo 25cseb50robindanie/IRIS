@@ -7,7 +7,7 @@ import { downloadFromApi } from "../download";
  * "Export" beside the Change Results header. GeoJSON: every change candidate with its provenance. Evaluation manifest:
  * build times, storage, index size, query latency and hardware.
  */
-export default function ExportMenu({ candidateCount = 0 }) {
+export default function ExportMenu({ candidateCount = 0, reviewCounts = null, onError = null }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
@@ -35,21 +35,44 @@ export default function ExportMenu({ candidateCount = 0 }) {
       await downloadFromApi(`${API_BASE}${path}`, fallbackName);
       setOpen(false);
     } catch (err) {
-      setError(err.message || "Export failed");
+      const message = err instanceof TypeError ? "Could not reach the IRIS backend." : err.message || "Export failed";
+      setError(message);
+      if (onError) onError(message);
     } finally {
       setBusy(null);
     }
   };
 
+  // Every candidate carries its analyst_decision, so "Export All" can be filtered again outside IRIS; the other two narrow the file
+  const n = (k) => reviewCounts?.[k];
+  const plural = (v, word) => `${v} ${word}${v === 1 ? "" : "s"}`;
   const items = [
     {
       key: "geojson",
       icon: FileJson,
-      title: "Change candidates (GeoJSON)",
-      hint: candidateCount ? `${candidateCount} candidate${candidateCount !== 1 ? "s" : ""}, outlines and provenance` : "No candidates to export",
+      title: "Export All (GeoJSON)",
+      hint: candidateCount ? `${plural(candidateCount, "candidate")}: confirmed, rejected and pending, each marked` : "No candidates to export",
       disabled: candidateCount === 0,
       path: "/api/export/changes",
       name: "iris_changes.geojson",
+    },
+    {
+      key: "geojson-confirmed",
+      icon: FileJson,
+      title: "Export Confirmed Only",
+      hint: n("confirmed") != null ? `${plural(n("confirmed"), "confirmed candidate")}` : "Candidates you confirmed",
+      disabled: n("confirmed") === 0 || candidateCount === 0,
+      path: "/api/export/changes?decision=confirmed",
+      name: "iris_changes_confirmed.geojson",
+    },
+    {
+      key: "geojson-pending",
+      icon: FileJson,
+      title: "Export Pending Only",
+      hint: n("pending") != null ? `${plural(n("pending"), "candidate")} not yet reviewed` : "Candidates not yet reviewed",
+      disabled: n("pending") === 0 || candidateCount === 0,
+      path: "/api/export/changes?decision=pending",
+      name: "iris_changes_pending.geojson",
     },
     {
       key: "manifest",

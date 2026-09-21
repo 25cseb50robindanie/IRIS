@@ -70,7 +70,9 @@ def test_sensor_and_date_detection():
     assert detect_acquisition_date(landsat_name) == "2023-06-15"
 
     bhuvan_name = "LISS3_2022-11-20_Scene01.tif"
-    assert detect_sensor(bhuvan_name) == "bhuvan"
+    assert detect_sensor(bhuvan_name) == "liss3"  # LISS-III by name
+    assert detect_sensor("LC09_L2SP_146039_20230615_20230622_02_T1.tif") == "landsat9"
+    assert detect_sensor("CARTOSAT2_2022-11-20.tif") == "bhuvan"
     assert detect_acquisition_date(bhuvan_name) == "2022-11-20"
 
     unknown_name = "random_aerial_image.tif"

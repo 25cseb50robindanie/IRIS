@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Search, Loader2, X } from "lucide-react";
+import { Search, Loader2, X, Layers } from "lucide-react";
 
 const SUGGESTIONS = [
   "structures near river",
@@ -9,7 +9,7 @@ const SUGGESTIONS = [
 ];
 
 // disabledReason: when set, the whole bar is greyed out and the reason replaces the placeholder
-export default function SearchBar({ onSearch, isSearching, disabledReason = null }) {
+export default function SearchBar({ onSearch, isSearching, disabledReason = null, searchAllScenes = false, onScopeChange = null, sceneLabel = null }) {
   const [query, setQuery] = useState("");
   const inactive = Boolean(disabledReason) || isSearching;
 
@@ -64,6 +64,34 @@ export default function SearchBar({ onSearch, isSearching, disabledReason = null
           Search
         </button>
       </form>
+
+      {onScopeChange && (
+        <div
+          role="group"
+          aria-label="Search scope"
+          className="flex items-center h-7 border border-qgis-border rounded-[3px] overflow-hidden shrink-0 text-[11px]"
+          title={searchAllScenes ? "Searching every imported scene" : `Searching only the scene on the map${sceneLabel ? ` (${sceneLabel})` : ""}`}
+        >
+          <Layers className="w-3 h-3 mx-1.5 text-neutral-500" />
+          {[
+            [false, "Active scene only"],
+            [true, "All scenes"],
+          ].map(([all, label]) => (
+            <button
+              key={label}
+              type="button"
+              onClick={() => onScopeChange(all)}
+              aria-pressed={searchAllScenes === all}
+              data-testid={all ? "scope-all" : "scope-active"}
+              className={`h-full px-2 whitespace-nowrap transition-colors ${
+                searchAllScenes === all ? "bg-neutral-800 text-white" : "bg-white text-neutral-700 hover:bg-qgis-hover"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="h-4 w-px bg-qgis-border shrink-0" />
 
