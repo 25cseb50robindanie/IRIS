@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
 
+from api.provenance import analysed_area
 from catalog import changes as store_changes
 from change_detection import params
 from change_detection.direction import direction_hints
@@ -117,6 +118,12 @@ def analyse_changes(
         }
     )
 
+    area = analysed_area(conn, completed)
+    meta["area_bounds"], meta["mgrs"] = area["bounds"], area["mgrs"]
+    meta["dates_analysed"] = sorted(
+        {d for j in completed for d in (dates.get(j["scene_a_id"]), dates.get(j["scene_b_id"])) if d}
+    )
+
     if not candidates:
         return {"change_status": NO_CHANGE, "change_results": [], "change_meta": meta}
 
@@ -172,6 +179,8 @@ def analyse_changes(
                 "confidence": c["confidence"],
                 "mean_dndvi": c["mean_dndvi"],
                 "area_px": c["area_px"],
+                "sub_blobs": c["sub_blobs"],
+                "mgrs": c["mgrs_ref"],
                 "review_status": c["review_status"],
                 "semantic_match_score": round(percentile, 4),
                 "semantic_similarity": round(similarity, 4),

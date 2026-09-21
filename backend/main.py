@@ -42,10 +42,13 @@ from titiler.application.main import app as titiler_app
 
 from api.catalog_status import router as catalog_router
 from api.change import router as change_router
+from api.change_export import router as export_router
+from api.evaluation import router as eval_router
 from api.ingest import router as ingest_router
 from api.pipeline_status import router as pipeline_router
 from api.scenes import router as scenes_router
 from api.search import router as search_router
+from api.similar import router as similar_router
 from change_detection.trigger import reconcile_interrupted_jobs
 from embedding.index import get_vector_store
 
@@ -142,6 +145,9 @@ app.include_router(ingest_router)
 app.include_router(search_router)
 app.include_router(catalog_router)
 app.include_router(change_router)
+app.include_router(export_router)
+app.include_router(eval_router)
+app.include_router(similar_router)
 app.include_router(pipeline_router)
 app.include_router(scenes_router)
 

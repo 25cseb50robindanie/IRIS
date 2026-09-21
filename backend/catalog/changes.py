@@ -8,6 +8,8 @@ import json
 import sqlite3
 from typing import Any, Dict, List, Optional
 
+from mgrs_ref import bounds_centre_mgrs
+
 # Job states: queued -> processing -> completed, or one of the terminal outcomes below
 JOB_QUEUED = "queued"
 JOB_PROCESSING = "processing"
@@ -125,16 +127,23 @@ def finish_job(
                     min_x, min_y, max_x, max_y, min_lon, min_lat, max_lon, max_lat,
                     change_type, direction, confidence,
                     norm_rmse, norm_cluster_dist, terrain_flatness, valid_coverage,
-                    alignment_quality, area_px, mean_dndvi, direction_evidence
+                    alignment_quality, area_px, mean_dndvi, direction_evidence,
+                    sub_blobs, centroid_lon, centroid_lat, mgrs_ref, geometry
                 ) VALUES (
                     :job_id, :scene_a_id, :scene_b_id,
                     :min_x, :min_y, :max_x, :max_y, :min_lon, :min_lat, :max_lon, :max_lat,
                     :change_type, :direction, :confidence,
                     :norm_rmse, :norm_cluster_dist, :terrain_flatness, :valid_coverage,
-                    :alignment_quality, :area_px, :mean_dndvi, :direction_evidence
+                    :alignment_quality, :area_px, :mean_dndvi, :direction_evidence,
+                    :sub_blobs, :centroid_lon, :centroid_lat, :mgrs_ref, :geometry
                 )
                 """,
                 {
+                    "sub_blobs": 1,
+                    "centroid_lon": None,
+                    "centroid_lat": None,
+                    "mgrs_ref": None,
+                    "geometry": None,
                     **cand,
                     "job_id": job_id,
                     "direction_evidence": json.dumps(cand["direction_evidence"]) if cand.get("direction_evidence") else None,
@@ -156,6 +165,7 @@ _CANDIDATE_SELECT = """
            c.change_type, c.direction, c.confidence,
            c.norm_cluster_dist, c.terrain_flatness, c.valid_coverage, c.alignment_quality,
            c.area_px, c.mean_dndvi, c.created_at, c.direction_evidence,
+           c.sub_blobs, c.centroid_lon, c.centroid_lat, c.mgrs_ref,
            sa.acquisition_date, sb.acquisition_date, sa.sensor,
            (SELECT r.decision FROM reviews r WHERE r.candidate_id = c.candidate_id
               ORDER BY r.review_id DESC LIMIT 1)
@@ -167,7 +177,8 @@ _CANDIDATE_SELECT = """
 _CANDIDATE_KEYS = (
     "candidate_id job_id scene_a_id scene_b_id min_x min_y max_x max_y min_lon min_lat max_lon max_lat "
     "change_type direction confidence norm_cluster_dist terrain_flatness valid_coverage alignment_quality "
-    "area_px mean_dndvi created_at direction_evidence scene_a_date scene_b_date sensor review_status"
+    "area_px mean_dndvi created_at direction_evidence sub_blobs centroid_lon centroid_lat mgrs_ref "
+    "scene_a_date scene_b_date sensor review_status"
 ).split()
 
 
@@ -178,6 +189,10 @@ def _candidate_row(row: tuple) -> Dict[str, Any]:
     if cand["change_type"] not in REFINED_TYPES:
         cand["change_type"] = "unclassified"  # stored before direction classification: the old names no longer exist
     cand["direction"] = cand["direction"] or "unclassified"
+    cand["sub_blobs"] = cand["sub_blobs"] or 1
+    if not cand["mgrs_ref"]:
+        # Stored before MGRS geocoding, or the centroid was not traced: the centre of the bounding box stands in
+        cand["mgrs_ref"] = bounds_centre_mgrs([cand["min_lon"], cand["min_lat"], cand["max_lon"], cand["max_lat"]])
     return cand
 
 

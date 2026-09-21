@@ -1,0 +1,152 @@
+{
+  "schema": "iris.eval_manifest/1",
+  "generated_at": "2026-09-21T15:03:59+00:00",
+  "last_operation": "query:find_similar",
+  "hardware": {
+    "cpu_model": "AMD Ryzen 7 250 w/ Radeon 780M Graphics",
+    "cpu_cores_physical": 8,
+    "cpu_threads": 16,
+    "ram_total_gb": 15.3,
+    "gpu": {
+      "available": false,
+      "name": null,
+      "note": "CUDA not available; inference runs on the CPU"
+    },
+    "os": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.14"
+  },
+  "software": {
+    "fastapi": "0.141.1",
+    "rasterio": "1.5.1",
+    "numpy": "2.4.6",
+    "scipy": "1.18.0",
+    "opencv-python-headless": "5.0.0.93",
+    "faiss-cpu": "1.15.1",
+    "torch": "2.14.0",
+    "open_clip_torch": "3.3.0",
+    "mgrs": "1.5.4"
+  },
+  "storage": {
+    "cogs_bytes": 2781703691,
+    "crops_bytes": 483622279,
+    "faiss_index_bytes": 11137914,
+    "sqlite_bytes": 39370752,
+    "total_bytes": 3315834636,
+    "total_mb": 3162.23
+  },
+  "index": {
+    "scenes": 2,
+    "tiles": 4802,
+    "faiss_vectors": 4802,
+    "change_candidates": 5000,
+    "scene_footprints_km2_sum": 25057.8
+  },
+  "ingestions": [
+    {
+      "recorded_at": "2026-09-21T14:45:05+00:00",
+      "scene_id": "S2A_MSIL2A_20220623T052701_N0510_R105_T43RGM_20241121T064634",
+      "source": "S2A_MSIL2A_20220623T052701_N0510_R105_T43RGM_20241121T064634.SAFE",
+      "outcome": "completed",
+      "tiles_indexed": 2401,
+      "total_s": 363.67,
+      "stages_s": {
+        "format_detection": 0.86,
+        "band_extraction": 98.23,
+        "scl_masking": 4.66,
+        "rgb_composite": 32.12,
+        "cog_conversion": 56.77,
+        "crop_generation": 54.62,
+        "embedding": 115.8,
+        "faiss_insertion": 0.28,
+        "overlap_check": 0.0
+      }
+    },
+    {
+      "recorded_at": "2026-09-21T14:55:52+00:00",
+      "scene_id": "S2C_MSIL2A_20260821T052641_N0512_R105_T43RGM_20260821T102216",
+      "source": "S2C_MSIL2A_20260821T052641_N0512_R105_T43RGM_20260821T102216.SAFE",
+      "outcome": "completed",
+      "tiles_indexed": 2401,
+      "total_s": 597.52,
+      "stages_s": {
+        "format_detection": 0.83,
+        "band_extraction": 108.81,
+        "scl_masking": 3.88,
+        "rgb_composite": 32.91,
+        "cog_conversion": 67.02,
+        "crop_generation": 66.27,
+        "embedding": 100.14,
+        "faiss_insertion": 0.33,
+        "overlap_check": 0.0,
+        "change_detection": 216.95
+      }
+    }
+  ],
+  "change_detection": [
+    {
+      "recorded_at": "2026-09-21T14:55:51+00:00",
+      "job_id": 13,
+      "scene_a_id": "S2A_MSIL2A_20220623T052701_N0510_R105_T43RGM_20241121T064634",
+      "scene_b_id": "S2C_MSIL2A_20260821T052641_N0512_R105_T43RGM_20260821T102216",
+      "status": "completed",
+      "detections": 5000,
+      "total_s": 215.17,
+      "stages_s": {
+        "masking": 21.75,
+        "grid_check": 0.23,
+        "alignment": 0.58,
+        "normalisation": 93.05,
+        "detection": 43.44,
+        "grouping": 9.91,
+        "scoring": 16.19,
+        "classification": 3.22,
+        "merging": 26.81
+      }
+    }
+  ],
+  "queries": {
+    "text_search": {
+      "count": 10,
+      "mean_ms": 669.5,
+      "p50_ms": 382.0,
+      "p95_ms": 1927.9,
+      "p99_ms": 2877.1,
+      "max_ms": 3114.4,
+      "samples_ms": [
+        3114.4,
+        366.6,
+        477.8,
+        362.2,
+        381.8,
+        382.1,
+        352.3,
+        470.9,
+        365.4,
+        421.9
+      ]
+    },
+    "find_similar": {
+      "count": 13,
+      "mean_ms": 66.0,
+      "p50_ms": 43.8,
+      "p95_ms": 166.1,
+      "p99_ms": 289.6,
+      "max_ms": 320.5,
+      "samples_ms": [
+        320.5,
+        43.7,
+        43.8,
+        63.1,
+        50.2,
+        40.2,
+        35.6,
+        46.3,
+        48.8,
+        39.3,
+        37.2,
+        42.6,
+        46.3
+      ]
+    }
+  }
+}

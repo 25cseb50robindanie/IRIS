@@ -52,6 +52,16 @@ class _Step:
         self.detail: Optional[str] = None
         self.done: Optional[int] = None
         self.total: Optional[int] = None
+        self.started: Optional[float] = None  # wall-clock start of the step (first time it was active)
+        self.ended: Optional[float] = None
+
+    def touch(self) -> None:
+        """Keep the step's start/end times in step with its state."""
+        now = time.monotonic()
+        if self.state == ACTIVE and self.started is None:
+            self.started = now
+        if self.state in (DONE, FAILED, SKIPPED) and self.started is not None and self.ended is None:
+            self.ended = now
 
 
 class _Pipeline:
@@ -86,6 +96,7 @@ class PipelineTracker:
         with self._lock:
             pipe = _Pipeline(pipeline_id, name)
             pipe.step("detect").state = ACTIVE
+            pipe.step("detect").touch()
             self._pipelines[pipeline_id] = pipe
             while len(self._pipelines) > MAX_TRACKED:
                 _, old = self._pipelines.popitem(last=False)
@@ -117,6 +128,7 @@ class PipelineTracker:
             step = pipe.step(key)
             for name, value in fields.items():
                 setattr(step, name, value)
+            step.touch()
 
     def begin(self, pid: Optional[str], key: str, detail: Optional[str] = None) -> None:
         self._update(pid, key, state=ACTIVE, detail=detail)
@@ -144,6 +156,7 @@ class PipelineTracker:
             active = next((s for s in pipe.steps if s.state == ACTIVE), None)
             if active is not None:
                 active.state, active.detail = FAILED, error
+                active.touch()
             if end:
                 pipe.state, pipe.message, pipe.ended = ERROR, f"Import failed — {error}", time.monotonic()
             return active is not None
@@ -159,6 +172,23 @@ class PipelineTracker:
                 if s.state in (PENDING, ACTIVE):
                     s.state = SKIPPED
             pipe.state, pipe.message, pipe.ended = FINISHED, message, time.monotonic()
+
+    def timings(self, pid: Optional[str]) -> Dict[str, float]:
+        """Seconds spent in every step that ran, keyed by step key (skipped and never-started steps are absent)."""
+        with self._lock:
+            pipe = self._pipelines.get(pid or "")
+            if pipe is None:
+                return {}
+            return {
+                s.key: round(s.ended - s.started, 3) for s in pipe.steps if s.started is not None and s.ended is not None
+            }
+
+    def elapsed(self, pid: Optional[str]) -> float:
+        with self._lock:
+            pipe = self._pipelines.get(pid or "")
+            if pipe is None:
+                return 0.0
+            return (pipe.ended if pipe.ended is not None else time.monotonic()) - pipe.started
 
     def snapshot(self, ident: str) -> Optional[Dict[str, Any]]:
         """State by pipeline id, or by scene id (the latest pipeline that imported that scene)."""

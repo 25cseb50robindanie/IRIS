@@ -16,6 +16,14 @@ from change_detection.direction import CHANGE_TYPES
 from main import app
 from s2_factory import Scenario, ingest_without_embedding, make_safe
 
+@pytest.fixture(autouse=True)
+def no_large_area_merge(monkeypatch):
+    """These fixtures put patches 40 px apart, which the large-area pass would (rightly) merge into one detection.
+    They test scoring, filtering and caps blob by blob, so the wide pass is off here (tests/test_grouping.py covers it)."""
+    monkeypatch.setattr(params, "LARGE_AREA_MIN_BLOBS", 10**6)
+    monkeypatch.setattr(params, "LARGE_AREA_MIN_PIXELS", 10**12)
+
+
 NAME_A = "S2A_MSIL2A_20240110T050649_N0510_R019_T43PHM_20240110T090000"
 NAME_B = "S2A_MSIL2A_20240214T050649_N0510_R019_T43PHM_20240214T090000"
 NAME_C = "S2A_MSIL2A_20240320T050649_N0510_R019_T43PHM_20240320T090000"

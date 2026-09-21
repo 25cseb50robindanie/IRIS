@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from catalog.database import get_scene_tile_count, init_connection, init_schema, insert_tiles_batch, upsert_scene
 from api.pipeline_status import PIPELINE_ID_RE, SAFE_STEPS, SINGLE_FILE_STEPS, new_pipeline_id, pipeline_tracker
 from change_detection.trigger import Reporter, schedule_change_detection
+import instrumentation
 from embedding import progress as stages
 from embedding.crop import extract_crops
 from embedding.embedder import CHECKPOINT_MISSING_MSG, RemoteCLIPEmbedder, find_checkpoint
@@ -20,6 +21,7 @@ from embedding.index import get_vector_store
 from embedding.progress import embedding_progress
 from ingestion.loader import convert_to_cog, inspect_raster, io_path
 from ingestion.safe import build_sentinel2_cogs, inspect_safe_product, open_safe_product
+from mgrs_ref import bounds_centre_mgrs
 
 logger = logging.getLogger("iris.api.ingest")
 router = APIRouter(prefix="/api", tags=["ingestion"])
@@ -358,6 +360,15 @@ def _run_embedding_job(cog_path: Path, scene_id: str, pid: Optional[str] = None)
             pipeline_tracker.finish(pid, f"Completed with errors — embedding failed; {found}")
         else:
             pipeline_tracker.finish(pid, f"Complete — {tiles} tile{'s' if tiles != 1 else ''} indexed, {found}")
+        snap = pipeline_tracker.snapshot(pid or "")
+        instrumentation.record_ingestion(
+            scene_id,
+            snap["name"] if snap else "",
+            pipeline_tracker.timings(pid),
+            pipeline_tracker.elapsed(pid),
+            "completed_with_errors" if embed_error else "completed",
+            tiles,
+        )
 
 
 def _embed_scene(cog_path: Path, scene_id: str, pid: Optional[str] = None) -> int:
@@ -424,6 +435,7 @@ def _embed_scene(cog_path: Path, scene_id: str, pid: Optional[str] = None) -> in
             "max_lat": crop.bounds_wgs84[3],
             "cloud_pct": None,
             "valid_pixel_frac": crop.valid_pixel_frac,
+            "mgrs_ref": bounds_centre_mgrs(crop.bounds_wgs84),  # 10-digit MGRS of the tile centroid
         }
         for crop, fid in zip(crops, faiss_ids)
     ]

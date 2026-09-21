@@ -8,12 +8,14 @@
 
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
+import instrumentation
 from api.change_search import analyse_changes
 from catalog.database import get_scene, get_tiles_by_faiss_ids, init_connection, init_schema, list_scene_tiles
 from embedding.embedder import RemoteCLIPEmbedder
@@ -49,6 +51,7 @@ class SearchResultItem(BaseModel):
     bounds: List[float]  # [min_lon, min_lat, max_lon, max_lat] in EPSG:4326 for map fitting
     bounds_native: Optional[List[float]] = None
     crop_url: Optional[str] = None
+    mgrs: Optional[str] = None  # 10-digit MGRS reference of the tile centroid
 
 
 class ChangeResultItem(BaseModel):
@@ -65,6 +68,8 @@ class ChangeResultItem(BaseModel):
     confidence: float
     mean_dndvi: Optional[float] = None
     area_px: Optional[int] = None
+    sub_blobs: int = 1  # change blobs merged into this detection
+    mgrs: Optional[str] = None  # 10-digit MGRS reference of the detection's centroid
     review_status: str
     semantic_match_score: float  # rank (0-1) of the after-crop's similarity among all tiles of the after scene
     semantic_similarity: float  # raw cosine similarity of that crop to the query
@@ -95,6 +100,9 @@ class ChangeMeta(BaseModel):
     unscored_candidates: int = 0
     thresholds: Dict[str, Any] = {}  # what 'no significant change' was measured against
     direction_hints: List[str] = []  # directions the query's wording asked for ("new" -> appearance, ...)
+    area_bounds: Optional[List[float]] = None  # ground the analysed pairs share [min_lon, min_lat, max_lon, max_lat]
+    mgrs: Optional[str] = None  # MGRS reference of that area's centre
+    dates_analysed: List[str] = []  # every acquisition date that took part in an analysed pair
 
 
 class SearchResponse(BaseModel):
@@ -118,12 +126,14 @@ def _semantic_item(tile_meta: Dict[str, Any], score: float) -> SearchResultItem:
         bounds=tile_meta["bounds_wgs84"],
         bounds_native=tile_meta["bounds_native"],
         crop_url=crop_url,
+        mgrs=tile_meta.get("mgrs"),
     )
 
 
 @router.post("/search", response_model=SearchResponse, status_code=status.HTTP_200_OK)
 def search_imagery(payload: SearchRequest) -> SearchResponse:
     """Semantic search plus change-aware search for one query."""
+    started = time.perf_counter()
     query_str = payload.query.strip()
     if not query_str:
         raise HTTPException(
@@ -204,6 +214,7 @@ def search_imagery(payload: SearchRequest) -> SearchResponse:
     finally:
         conn.close()
 
+    instrumentation.record_query(instrumentation.QUERY_TEXT, time.perf_counter() - started)
     return SearchResponse(
         query=query_str,
         scene_id=payload.scene_id,

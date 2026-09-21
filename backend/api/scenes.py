@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
+import instrumentation
 from api.ingest import EMBED_LOCK
 from catalog.database import (
     delete_scene_rows,
@@ -204,6 +205,7 @@ def delete_scene(scene_id: str) -> DeleteResult:
     finally:
         EMBED_LOCK.release()
 
+    instrumentation.note_change(f"scene_deleted:{scene_id}")
     logger.info("Deleted scene %s: %s, vectors %d -> %d", scene_id, counts, before, after)
     return DeleteResult(
         scene_id=scene_id,

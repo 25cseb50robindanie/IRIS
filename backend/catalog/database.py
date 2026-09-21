@@ -8,6 +8,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from mgrs_ref import backfill_missing
+
 DB_PATH = Path("data/iris_catalog.db")
 
 
@@ -67,6 +69,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             max_lat         REAL,
             cloud_pct       REAL,
             valid_pixel_frac REAL,
+            mgrs_ref        TEXT,    -- 10-digit MGRS reference of the tile centroid
             FOREIGN KEY (scene_id) REFERENCES scenes(scene_id)
         );
 
@@ -123,6 +126,11 @@ def init_schema(conn: sqlite3.Connection) -> None:
             area_px         INTEGER,
             mean_dndvi      REAL,    -- signed mean NDVI(B) - NDVI(A) inside the blob; NULL without a NIR band
             direction_evidence TEXT, -- JSON: dominant classes at each date, class shares, rule that fired
+            sub_blobs       INTEGER, -- change blobs merged into this detection (1 = a single blob)
+            centroid_lon    REAL,    -- centroid of the changed pixels
+            centroid_lat    REAL,
+            mgrs_ref        TEXT,    -- 10-digit MGRS reference of that centroid
+            geometry        TEXT,    -- GeoJSON geometry (EPSG:4326) of the changed pixels; NULL before it was stored
             created_at      TEXT DEFAULT (datetime('now'))
         );
 
@@ -160,19 +168,33 @@ def init_schema(conn: sqlite3.Connection) -> None:
             "area_px": "INTEGER",
             "mean_dndvi": "REAL",
             "direction_evidence": "TEXT",
+            "sub_blobs": "INTEGER",
+            "centroid_lon": "REAL",
+            "centroid_lat": "REAL",
+            "mgrs_ref": "TEXT",
+            "geometry": "TEXT",
         },
     )
+    if _ensure_columns(cursor, "tiles", {"mgrs_ref": "TEXT"}):
+        # Tiles imported before MGRS geocoding existed: derive the reference from the tile's own WGS84 bounds
+        rows = cursor.execute(
+            "SELECT tile_id, min_lon, min_lat, max_lon, max_lat FROM tiles WHERE min_lon IS NOT NULL"
+        ).fetchall()
+        cursor.executemany("UPDATE tiles SET mgrs_ref = ? WHERE tile_id = ?", backfill_missing(rows))
 
     conn.commit()
 
 
-def _ensure_columns(cursor: sqlite3.Cursor, table: str, columns: Dict[str, str]) -> None:
-    """Add any missing columns to an existing table (idempotent schema migration)."""
+def _ensure_columns(cursor: sqlite3.Cursor, table: str, columns: Dict[str, str]) -> bool:
+    """Add any missing columns to an existing table (idempotent schema migration). True when one was added."""
     cursor.execute(f"PRAGMA table_info({table})")
     existing = {row[1] for row in cursor.fetchall()}
+    added = False
     for name, col_type in columns.items():
         if name not in existing:
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
+            added = True
+    return added
 
 
 def insert_tiles_batch(conn: sqlite3.Connection, tiles_data: List[Dict[str, Any]]) -> None:
@@ -196,7 +218,8 @@ def insert_tiles_batch(conn: sqlite3.Connection, tiles_data: List[Dict[str, Any]
             max_lon,
             max_lat,
             cloud_pct,
-            valid_pixel_frac
+            valid_pixel_frac,
+            mgrs_ref
         ) VALUES (
             :tile_id,
             :scene_id,
@@ -210,7 +233,8 @@ def insert_tiles_batch(conn: sqlite3.Connection, tiles_data: List[Dict[str, Any]
             :max_lon,
             :max_lat,
             :cloud_pct,
-            :valid_pixel_frac
+            :valid_pixel_frac,
+            :mgrs_ref
         )
         ON CONFLICT(tile_id) DO UPDATE SET
             faiss_id=excluded.faiss_id,
@@ -222,7 +246,8 @@ def insert_tiles_batch(conn: sqlite3.Connection, tiles_data: List[Dict[str, Any]
             min_lat=excluded.min_lat,
             max_lon=excluded.max_lon,
             max_lat=excluded.max_lat,
-            valid_pixel_frac=excluded.valid_pixel_frac;
+            valid_pixel_frac=excluded.valid_pixel_frac,
+            mgrs_ref=excluded.mgrs_ref;
         """,
         tiles_data,
     )
@@ -241,7 +266,7 @@ def get_tiles_by_faiss_ids(conn: sqlite3.Connection, faiss_ids: List[int]) -> Di
             tile_id, scene_id, faiss_id,
             min_x, min_y, max_x, max_y,
             min_lon, min_lat, max_lon, max_lat,
-            valid_pixel_frac
+            valid_pixel_frac, mgrs_ref
         FROM tiles
         WHERE faiss_id IN ({placeholders})
         """,
@@ -258,6 +283,7 @@ def get_tiles_by_faiss_ids(conn: sqlite3.Connection, faiss_ids: List[int]) -> Di
             "bounds_native": [row[3], row[4], row[5], row[6]],
             "bounds_wgs84": [row[7], row[8], row[9], row[10]] if row[7] is not None else [row[3], row[4], row[5], row[6]],
             "valid_pixel_frac": row[11],
+            "mgrs": row[12],
         }
     return results
 

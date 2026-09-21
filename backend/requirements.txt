@@ -17,3 +17,5 @@ open-clip-torch==2.26.1
 torch==2.4.0
 Pillow==10.4.0
 huggingface_hub==1.32.0
+mgrs==1.5.4
+psutil==7.2.2

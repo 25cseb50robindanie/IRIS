@@ -169,7 +169,8 @@ def classify_candidates(det: Any, candidates: List[Dict[str, Any]]) -> Dict[str,
     """Fill `direction`, `change_type` and `direction_evidence` on every candidate, in place.
 
     Reads the per-date Classification Components and brightness difference that the Phase 4 pass stored, plus the
-    Change Blob labels. Each candidate carries the label of its blob in `blob_label`, which is removed here.
+    Change Blob labels. Each candidate carries the label of its blob in `blob_label`; merging into detections
+    (grouping.merge_candidates) removes it later.
     """
     trace: Dict[str, Any] = {"available": det.class_a is not None, "by_direction": {}, "by_type": {}}
     for cand in candidates:
@@ -178,8 +179,6 @@ def classify_candidates(det: Any, candidates: List[Dict[str, Any]]) -> Dict[str,
 
     if det.class_a is None or det.class_b is None or det.labels is None or not candidates:
         # No NIR band (or nothing to classify): a direction cannot be derived, so none is claimed
-        for cand in candidates:
-            cand.pop("blob_label", None)
         return trace
 
     labels = det.labels
@@ -217,7 +216,6 @@ def classify_candidates(det: Any, candidates: List[Dict[str, Any]]) -> Dict[str,
         cand["direction"] = direction
         cand["change_type"] = change_type
         cand["direction_evidence"] = evidence
-        cand.pop("blob_label", None)
         trace["by_direction"][direction] = trace["by_direction"].get(direction, 0) + 1
         trace["by_type"][change_type] = trace["by_type"].get(change_type, 0) + 1
     logger.info("Direction: %s | types: %s", trace["by_direction"], trace["by_type"])

@@ -54,3 +54,6 @@ export function describeDirection(detail) {
   if (detail.direction === "unclassified") parts.push(ev.rule);
   return `Direction: ${direction}${type}. Evidence: ${parts.join(", ")}.`;
 }
+
+// 10 m pixels are 100 m² each. One decimal always, so 24,730 px reads "247.3 ha" and a small blob "1.1 ha".
+export const hectares = (px) => `${(px / 100).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ha`;

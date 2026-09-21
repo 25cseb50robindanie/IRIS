@@ -52,7 +52,8 @@ export default function CompareMap({ cogUrl, box, focusBounds, onReady }) {
             [focusBounds[2], focusBounds[3]],
           ]
         : undefined,
-      fitBoundsOptions: { padding: 60, maxZoom: 16 },
+      // No padding: the parent already chose a window with context around the change, and padding would shrink it again
+      fitBoundsOptions: { padding: 0, maxZoom: 17 },
       attributionControl: false,
     });
     mapRef.current = map;

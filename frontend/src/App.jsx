@@ -5,9 +5,9 @@ import Sidebar from "./components/Sidebar";
 import SearchBar from "./components/SearchBar";
 import StatusBar from "./components/StatusBar";
 import ChangeComparison from "./components/ChangeComparison";
+import { API_BASE } from "./api";
 import { DEFAULT_FILTERS } from "./components/ChangeResults";
 
-const API_BASE = "http://127.0.0.1:8000";
 const EMBED_TERMINAL_STATES = new Set(["ready", "failed", "not_embedded"]);
 const EMBED_POLL_MS = 750;
 const EMBED_MAX_POLL_FAILURES = 5;
@@ -78,10 +78,14 @@ export default function App() {
     searchedScene: null,
     error: null,
     selectedResult: null,
+    similarTo: null, // {tile_id, label} while the semantic results are "tiles like this one" rather than a query's matches
+    busy: "search", // what isSearching is waiting for: "search" (a query) or "similar" (Find Similar)
+    errorTitle: "Search failed",
   });
   const searchStateRef = useRef(null);
   searchStateRef.current = searchState;
   const [searchCount, setSearchCount] = useState(0); // bumps per search so the Workspace re-applies its defaults
+  const [similarKey, setSimilarKey] = useState(0); // bumps per Find Similar so the Workspace opens its results
 
   // Imported scenes (toolbar switcher) and the step-by-step progress of the import in flight
   const [scenes, setScenes] = useState([]);
@@ -495,7 +499,9 @@ export default function App() {
         ...prev,
         query: queryText,
         isSearching: true,
+        busy: "search",
         error: null,
+        errorTitle: "Search failed",
         selectedResult: null,
       }));
     }
@@ -518,10 +524,12 @@ export default function App() {
       const data = await response.json();
       const results = data.semantic_results || [];
 
+      // A silent refresh keeps a Find Similar list on screen: it is not the query's answer
       setSearchState((prev) => ({
         ...prev,
         isSearching: silent ? prev.isSearching : false,
-        results: results,
+        results: silent && prev.similarTo ? prev.results : results,
+        similarTo: silent ? prev.similarTo : null,
         changeResults: data.change_results || [],
         changeStatus: data.change_status,
         changeMeta: data.change_meta,
@@ -580,6 +588,47 @@ export default function App() {
     showResult(result);
   };
 
+  // Find Similar: the seed's own embedding is the query (image-to-image), and its neighbours replace the semantic results
+  const handleFindSimilar = async ({ tileId = null, candidateId = null }) => {
+    setSearchState((prev) => ({ ...prev, isSearching: true, busy: "similar", error: null, errorTitle: "Find Similar failed" }));
+    setSimilarKey((n) => n + 1); // open the Semantic Results section now, so the spinner and any error are seen
+    try {
+      const response = await fetch(`${API_BASE}/api/search/similar`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(tileId ? { tile_id: tileId, top_k: 10 } : { candidate_id: candidateId, top_k: 10 }),
+      });
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        // A backend started before this route existed answers 404 {"detail": "Not Found"}: say what to do about it
+        if (response.status === 404 && errData.detail === "Not Found") {
+          throw new Error(
+            "The running backend does not have Find Similar yet. Restart it (cd backend, then uvicorn main:app --host 127.0.0.1 --port 8000) so it loads the latest code."
+          );
+        }
+        throw new Error(errData.detail || `Find Similar failed: HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      const results = data.semantic_results || [];
+      setSearchState((prev) => ({
+        ...prev,
+        isSearching: false,
+        results,
+        similarTo: { tile_id: data.similar_to.tile_id, label: data.label },
+        selectedResult: null,
+      }));
+      if (results.length > 0) showResult(results[0]);
+    } catch (err) {
+      console.error("Find Similar failed:", err);
+      const unreachable = err instanceof TypeError; // fetch itself failed: nothing answered
+      setSearchState((prev) => ({
+        ...prev,
+        isSearching: false,
+        error: unreachable ? "Could not reach the IRIS backend." : err.message || "Find Similar failed",
+      }));
+    }
+  };
+
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-qgis-bg">
       {/* 1. Top Toolbar */}
@@ -625,11 +674,16 @@ export default function App() {
           catalogError={catalogError}
           error={error}
           searchError={searchState.error}
+          searchErrorTitle={searchState.errorTitle}
+          busyWith={searchState.busy}
           searchResults={searchState.results}
           searchQuery={searchState.query}
           isSearching={searchState.isSearching}
           selectedTileId={searchState.selectedResult?.tile_id}
           onSelectResult={handleSelectResult}
+          similarTo={searchState.similarTo}
+          similarKey={similarKey}
+          onFindSimilar={handleFindSimilar}
           search={{
             hasSearched: searchState.hasSearched,
             query: searchState.query,

@@ -1,4 +1,5 @@
 ﻿import React from "react";
+import { spacedMgrs, toMgrs } from "../mgrs";
 
 export default function StatusBar({ mousePos, activeCrs }) {
   const { lng, lat, zoom, bearing } = mousePos || {};
@@ -10,6 +11,9 @@ export default function StatusBar({ mousePos, activeCrs }) {
     const latDir = lat >= 0 ? "N" : "S";
     return `Coordinate: ${Math.abs(lng).toFixed(5)}° ${lngDir}, ${Math.abs(lat).toFixed(5)}° ${latDir}`;
   };
+
+  // MGRS of the point under the cursor (10-digit; blank where MGRS is undefined, e.g. the poles)
+  const mgrsRef = lng === undefined || lat === undefined ? null : toMgrs(lat, lng);
 
   // Derive approximate map scale from zoom
   const calculateScale = (z) => {
@@ -24,6 +28,13 @@ export default function StatusBar({ mousePos, activeCrs }) {
       <div className="flex items-center space-x-4">
         <div className="flex items-center space-x-1.5 min-w-[210px]">
           <span className="text-neutral-800">{formatCoord()}</span>
+        </div>
+
+        <div className="h-3 w-px bg-neutral-300" />
+
+        <div className="flex items-center space-x-1 min-w-[150px]" data-testid="status-mgrs">
+          <span className="text-neutral-500 font-sans">MGRS</span>
+          <span className="text-neutral-800">{mgrsRef ? spacedMgrs(mgrsRef) : "—"}</span>
         </div>
 
         <div className="h-3 w-px bg-neutral-300" />

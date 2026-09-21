@@ -1,6 +1,9 @@
 import React, { useMemo, useState } from "react";
-import { GitCompare, Loader2, AlertCircle, Check, Ban, Copy, Download, ShieldCheck } from "lucide-react";
-import { allOn, changeLabel, DIRECTION_ICONS, DIRECTION_OPTIONS, directionLabel, TYPE_OPTIONS } from "./changeKinds";
+import { GitCompare, Loader2, AlertCircle, Check, Ban, Copy, Download, ShieldCheck, Images } from "lucide-react";
+import { downloadJson } from "../download";
+import { boundsMgrs, spacedMgrs } from "../mgrs";
+import ExportMenu from "./ExportMenu";
+import { allOn, changeLabel, DIRECTION_ICONS, DIRECTION_OPTIONS, directionLabel, hectares, TYPE_OPTIONS } from "./changeKinds";
 import SectionHeader from "./SectionHeader";
 
 export const DEFAULT_FILTERS = {
@@ -56,7 +59,6 @@ const centre = (b) => {
 };
 
 const pct = (v) => `${Math.round(v * 100)}%`;
-const hectares = (px) => `${(px / 100).toFixed(px >= 1000 ? 0 : 1)} ha`; // 10 m pixels: 100 m² each
 
 function JobLine({ job }) {
   const state = JOB_STATES[job.status];
@@ -175,7 +177,7 @@ function ChangeFilters({ filters, onChange, showMatchSort }) {
         >
           {showMatchSort && <option value="match">Best match</option>}
           <option value="confidence">Confidence</option>
-          <option value="area">Area</option>
+          <option value="area">Area (largest first)</option>
           <option value="date">Date</option>
         </select>
       </label>
@@ -183,16 +185,26 @@ function ChangeFilters({ filters, onChange, showMatchSort }) {
   );
 }
 
-function ChangeCard({ c, rank, selected, onOpen, showMatch }) {
+function ChangeCard({ c, rank, selected, onOpen, onFindSimilar, showMatch }) {
   const status = c.review_status || "pending";
   const DirectionIcon = DIRECTION_ICONS[c.direction || "unclassified"];
+  const mgrsRef = c.mgrs || boundsMgrs(c.bounds);
+  const open = () => onOpen && onOpen(c.candidate_id);
+  // A div, not a button: the card holds its own Find Similar button, and buttons cannot nest
   return (
-    <button
-      type="button"
-      onClick={() => onOpen && onOpen(c.candidate_id)}
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={open}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          open();
+        }
+      }}
       data-testid="change-card"
       data-review-status={status}
-      className={`w-full text-left p-2 rounded-[3px] border transition-colors ${
+      className={`w-full text-left p-2 rounded-[3px] border transition-colors cursor-pointer ${
         selected ? `border-neutral-500 ${status === "pending" ? "bg-neutral-100" : CARD_STYLE[status].split(" ")[0]}` : CARD_STYLE[status]
       }`}
     >
@@ -214,7 +226,9 @@ function ChangeCard({ c, rank, selected, onOpen, showMatch }) {
       </div>
 
       <div className="mt-1 flex items-center justify-between">
-        <span className="font-mono text-[10px] text-neutral-500 truncate">{centre(c.bounds)}</span>
+        <span className="font-mono text-[10px] text-neutral-500 truncate" title="Centre of the detection">
+          {centre(c.bounds)}
+        </span>
         <span
           className={`flex items-center space-x-0.5 px-1.5 py-px rounded-[3px] text-[10px] font-medium shrink-0 ${REVIEW_STYLE[status]}`}
         >
@@ -224,10 +238,17 @@ function ChangeCard({ c, rank, selected, onOpen, showMatch }) {
         </span>
       </div>
 
+      {mgrsRef && (
+        <div className="mt-0.5 font-mono text-[10px] text-neutral-500 truncate" title={`MGRS ${mgrsRef}`} data-testid="change-mgrs">
+          MGRS {spacedMgrs(mgrsRef)}
+        </div>
+      )}
+
       <div className="mt-0.5 font-mono text-[10px] text-neutral-400 truncate">
         {c.scene_a_date} → {c.scene_b_date}
         {c.mean_dndvi != null ? ` · ΔNDVI ${c.mean_dndvi.toFixed(2)}` : ""}
         {c.area_px ? ` · ${hectares(c.area_px)}` : ""}
+        {c.sub_blobs > 1 ? ` · ${c.sub_blobs} blobs merged` : ""}
       </div>
 
       {showMatch && (
@@ -246,7 +267,26 @@ function ChangeCard({ c, rank, selected, onOpen, showMatch }) {
           +{c.direction_boost.toFixed(1)} score: query implies {directionLabel(c.direction).toLowerCase()}
         </div>
       )}
-    </button>
+
+      {onFindSimilar && (
+        <div className="mt-1.5 flex justify-end">
+          <button
+            type="button"
+            title="Find similar sites: tiles that look like this change's after-image"
+            aria-label="Find similar"
+            data-testid="find-similar-change"
+            onClick={(e) => {
+              e.stopPropagation();
+              onFindSimilar({ candidateId: c.candidate_id });
+            }}
+            className="flex items-center space-x-1 px-1.5 py-0.5 text-[10px] text-neutral-600 border border-neutral-200 rounded-[3px] bg-white hover:bg-neutral-100"
+          >
+            <Images className="w-3 h-3" />
+            <span>Find Similar</span>
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -260,19 +300,29 @@ function NegativeEvidenceCard({ evidence, query, sceneId }) {
   const t = evidence.thresholds || {};
   const statement = `This area was observed on ${evidence.datesCompared} with ${coverage} valid coverage. No significant change was detected. This is a confirmed negative — the area was analysed, not just unexamined.`;
 
+  // The exported statement is the analyst's to hand on: what was observed, how completely, and what was asked
+  const exportedStatement = `This area was observed on the listed dates with ${coverage} valid coverage. ${
+    query ? "No changes matching the query were detected above the confidence threshold." : "No changes were detected above the confidence threshold."
+  }`;
+  const mgrsRef = evidence.mgrs || boundsMgrs(evidence.areaBounds);
+
   const record = () => ({
     type: "negative_evidence",
     generated_at: new Date().toISOString(),
-    scene_id: sceneId || null,
     query: query || null,
-    dates_compared: evidence.datesCompared,
+    area_bounds: evidence.areaBounds || null,
+    mgrs: mgrsRef || null,
+    dates_analysed: evidence.datesAnalysed || [],
     valid_coverage: evidence.validCoverage,
+    // An absence can only be as certain as the area was observed, so the two are the same number
+    confidence_in_absence: evidence.validCoverage,
+    statement: exportedStatement,
+    scene_id: sceneId || null,
     pairs: evidence.pairs,
     method: {
       minimum_mapping_unit_px: t.minimum_mapping_unit_px ?? null,
       minimum_confidence: t.minimum_confidence ?? null,
     },
-    statement,
   });
 
   const copy = async () => {
@@ -280,13 +330,14 @@ function NegativeEvidenceCard({ evidence, query, sceneId }) {
     const text = [
       "NEGATIVE EVIDENCE — no significant change detected",
       r.scene_id && `Scene: ${r.scene_id}`,
-      `Observed: ${r.dates_compared}`,
+      r.mgrs && `MGRS: ${r.mgrs}`,
+      `Observed: ${(r.dates_analysed || []).join(", ") || evidence.datesCompared}`,
       `Valid coverage: ${coverage}`,
       ...(r.pairs || []).map((p) => `  Pair ${p.dates}${p.valid_coverage != null ? ` (coverage ${pct(p.valid_coverage)})` : ""}`),
       r.method.minimum_mapping_unit_px != null && `Method: minimum mapping unit ${r.method.minimum_mapping_unit_px} px, minimum confidence ${r.method.minimum_confidence}`,
       r.query && `Query: "${r.query}"`,
       "",
-      statement,
+      r.statement,
       `Generated: ${r.generated_at}`,
     ]
       .filter((l) => l !== false && l !== null && l !== undefined)
@@ -300,15 +351,7 @@ function NegativeEvidenceCard({ evidence, query, sceneId }) {
     setTimeout(() => setCopied(null), 2000);
   };
 
-  const exportJson = () => {
-    const blob = new Blob([JSON.stringify(record(), null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `negative-evidence-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
+  const exportJson = () => downloadJson(`negative-evidence-${new Date().toISOString().slice(0, 10)}.json`, record());
 
   return (
     <div className="border border-emerald-200 bg-emerald-50/60 rounded-[3px] p-2.5" data-testid="negative-evidence">
@@ -317,6 +360,11 @@ function NegativeEvidenceCard({ evidence, query, sceneId }) {
         <span>Confirmed negative</span>
       </div>
       <p className="mt-1 text-[11px] leading-snug text-emerald-950">{statement}</p>
+      {mgrsRef && (
+        <div className="mt-1 font-mono text-[10px] text-emerald-900" data-testid="negative-mgrs">
+          Area centre MGRS {spacedMgrs(mgrsRef)}
+        </div>
+      )}
       <div className="mt-2 flex items-center space-x-2">
         <button
           type="button"
@@ -363,6 +411,7 @@ export default function ChangeResults({
   onViewChange,
   selectedChangeId,
   onOpenChange,
+  onFindSimilar,
   open = true,
   onToggle,
 }) {
@@ -397,6 +446,9 @@ export default function ChangeResults({
         validCoverage: search.meta.valid_coverage,
         pairs: search.meta.pairs,
         thresholds: search.meta.thresholds,
+        areaBounds: search.meta.area_bounds,
+        mgrs: search.meta.mgrs,
+        datesAnalysed: search.meta.dates_analysed,
       };
     }
     // With a pair chip selected, the negative is about that pair alone
@@ -417,6 +469,9 @@ export default function ChangeResults({
           candidates: p.candidates,
         })),
         thresholds: changes?.thresholds,
+        areaBounds: changes?.area?.bounds,
+        mgrs: changes?.area?.mgrs,
+        datesAnalysed: [...new Set(scoped.flatMap((p) => [p.scene_a_date, p.scene_b_date]).filter(Boolean))].sort(),
       };
     }
     return null;
@@ -440,7 +495,14 @@ export default function ChangeResults({
 
   return (
     <div className="p-3">
-      <SectionHeader icon={GitCompare} title="Change Results" count={count} open={open} onToggle={onToggle} />
+      <SectionHeader
+        icon={GitCompare}
+        title="Change Results"
+        count={count}
+        open={open}
+        onToggle={onToggle}
+        actions={<ExportMenu candidateCount={changes?.total ?? 0} />}
+      />
 
       {open && (
         <>
@@ -487,6 +549,7 @@ export default function ChangeResults({
                       rank={idx + 1}
                       selected={selectedChangeId === c.candidate_id}
                       onOpen={onOpenChange}
+                      onFindSimilar={onFindSimilar}
                       showMatch={inSearch}
                     />
                   ))}

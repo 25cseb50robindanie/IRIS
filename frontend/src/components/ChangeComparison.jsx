@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
-import { X, Check, Ban, Loader2, AlertCircle } from "lucide-react";
+import { X, Check, Ban, Loader2, AlertCircle, ChevronRight } from "lucide-react";
+import { boundsMgrs, formatLatLon, spacedMgrs } from "../mgrs";
 import CompareMap from "./CompareMap";
 
-import { changeLabel, describeDirection, DIRECTION_ICONS } from "./changeKinds";
+import { changeLabel, describeDirection, DIRECTION_ICONS, hectares } from "./changeKinds";
 
 const TERM_LABELS = {
   alignment_quality: "Alignment quality",
@@ -28,6 +29,7 @@ export default function ChangeComparison({ detail, loading, error, onClose, onRe
   const syncing = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [reviewError, setReviewError] = useState(null);
+  const [traceOpen, setTraceOpen] = useState(false); // "Processing Details": the full decision trace
 
   // Keep the two maps moving together: whichever one the analyst drags drives the other
   const link = (from, to) => {
@@ -106,13 +108,18 @@ export default function ChangeComparison({ detail, loading, error, onClose, onRe
   }
 
   const { scene_a: a, scene_b: b, bounds } = detail;
-  const focus = [
+  // The window the view opens on: 4x the box, clamped to the scene by the backend. The orange outline stays on the
+  // blob's own bounds, so the change is seen in its surroundings.
+  const focus = detail.display_bounds || [
     bounds[0] - (bounds[2] - bounds[0]) * 1.5,
     bounds[1] - (bounds[3] - bounds[1]) * 1.5,
     bounds[2] + (bounds[2] - bounds[0]) * 1.5,
     bounds[3] + (bounds[3] - bounds[1]) * 1.5,
   ];
   const breakdown = detail.confidence_breakdown;
+  const [lon, lat] = detail.centroid || [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2];
+  const mgrsRef = detail.mgrs || boundsMgrs(bounds);
+  const traceLines = detail.processing_details || [];
   const DirectionIcon = DIRECTION_ICONS[detail.direction || "unclassified"];
 
   return (
@@ -142,7 +149,7 @@ export default function ChangeComparison({ detail, loading, error, onClose, onRe
       </div>
 
       {/* Details + decision */}
-      <div className="shrink-0 border-t border-qgis-border bg-qgis-bg px-4 py-3 flex flex-wrap items-start gap-x-8 gap-y-3 text-xs text-qgis-text select-none">
+      <div className="shrink-0 max-h-[45vh] overflow-y-auto border-t border-qgis-border bg-qgis-bg px-4 py-3 flex flex-wrap items-start gap-x-8 gap-y-3 text-xs text-qgis-text select-none">
         <div className="min-w-[210px] max-w-[340px]">
           <div className="flex items-center space-x-2">
             {DirectionIcon && <DirectionIcon className="w-4 h-4 text-neutral-700" aria-hidden="true" />}
@@ -156,10 +163,22 @@ export default function ChangeComparison({ detail, loading, error, onClose, onRe
             {detail.mean_dndvi != null && (
               <span className="ml-2 font-mono text-neutral-500">ΔNDVI {detail.mean_dndvi.toFixed(2)}</span>
             )}
+            {detail.area_px ? (
+              <span className="ml-2 font-mono text-neutral-500" data-testid="detail-area">
+                {hectares(detail.area_px)}
+              </span>
+            ) : null}
           </div>
           <div className="mt-1 text-neutral-700 leading-snug" data-testid="direction-text">
             {describeDirection(detail)}
           </div>
+          <div className="mt-1 font-mono text-[11px] text-neutral-600" data-testid="detail-location">
+            {formatLatLon(lat, lon)}
+            {mgrsRef ? ` · MGRS ${spacedMgrs(mgrsRef)}` : ""}
+          </div>
+          {detail.sub_blobs > 1 && (
+            <div className="mt-0.5 text-[10px] text-neutral-500">Merged from {detail.sub_blobs} nearby change blobs</div>
+          )}
           <div className="mt-2 font-mono text-[11px] text-neutral-500 space-y-0.5">
             <div className="truncate max-w-[300px]" title={a.scene_id}>
               A {a.acquisition_date} · {a.scene_id}
@@ -185,6 +204,31 @@ export default function ChangeComparison({ detail, loading, error, onClose, onRe
           </div>
           {detail.terrain_is_placeholder && (
             <div className="mt-1 text-[10px] text-neutral-400">Terrain is a placeholder (no DEM loaded yet).</div>
+          )}
+
+          {traceLines.length > 0 && (
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={() => setTraceOpen((o) => !o)}
+                aria-expanded={traceOpen}
+                data-testid="processing-toggle"
+                className="flex items-center space-x-1 text-[11px] font-semibold text-neutral-600 hover:text-neutral-900"
+              >
+                <ChevronRight className={`w-3 h-3 text-neutral-400 transition-transform ${traceOpen ? "rotate-90" : ""}`} />
+                <span>Processing Details</span>
+              </button>
+              {traceOpen && (
+                <dl className="mt-1 space-y-1 max-w-[440px]" data-testid="processing-details">
+                  {traceLines.map((line) => (
+                    <div key={line.key} className="flex text-[11px] leading-snug" data-testid={`trace-${line.key}`}>
+                      <dt className="w-24 shrink-0 text-neutral-500">{line.label}</dt>
+                      <dd className="text-neutral-800 min-w-0 break-words">{line.text}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+            </div>
           )}
         </div>
 

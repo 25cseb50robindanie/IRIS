@@ -48,6 +48,26 @@ MORPH_KERNEL_SIZE = 3
 MIN_BLOB_PIXELS = 100  # minimum mapping unit: 1 ha at 10 m. Below this, field-boundary noise dominates multi-year pairs
 CONNECTIVITY_NOTE = "scipy.ndimage.label default (4-connectivity)"
 
+# --- Merging nearby blobs into one detection ----------------------------------------------------------------
+# Blobs whose masks touch after growing by this many pixels (100 m at 10 m) share a detection. The second value is the
+# fallback when a group at the first is too big to be one place (see LARGE_AREA_MAX_* below).
+NEAR_DILATIONS = (10, 5)
+GROUP_DILATION_PX = NEAR_DILATIONS[0]
+# Second pass for large-area changes (an airport, a quarry, a township): a wider dilation finds blobs that belong to one
+# big change. Such a group becomes ONE detection when it has this many blobs, or covers more than this many pixels;
+# smaller groups keep whatever the first pass gave them. Blobs merge when their gap is up to twice the dilation.
+LARGE_AREA_DILATIONS = (30, 20)  # widest first (30 px = 300 m at 10 m); a blob takes the widest level that holds
+LARGE_AREA_DILATION_PX = LARGE_AREA_DILATIONS[0]
+LARGE_AREA_MIN_BLOBS = 3
+LARGE_AREA_MIN_PIXELS = 500  # 5 ha at 10 m: strictly more than this merges
+# Guard against runaway chaining, applied at EVERY level. Groups merge transitively, so on a scene dense with
+# field-scale change (a multi-year pair over farmland) even a 10 px dilation links blobs across the whole tile: on the
+# Jewar 2022-2026 pair 28,470 blobs became one 151,937 ha "detection" at 30 px and 12,458 blobs one 94,522 ha one at
+# 10 px. A group wider or larger than this is not one change: its blobs fall back to the next narrower level, and
+# stay individual candidates if none holds.
+LARGE_AREA_MAX_EXTENT_PX = 500  # longest side of a group's bounding box: 5 km at 10 m
+LARGE_AREA_MAX_PIXELS = 250_000  # 2,500 ha at 10 m
+
 # --- Phase 5: scoring ------------------------------------------------------------------------------------
 CONFIDENCE_WEIGHTS = {
     "alignment_quality": 0.35,
@@ -64,6 +84,9 @@ SAME_TILE_ALIGNMENT_QUALITY = 0.90
 MIN_CANDIDATE_VALID_COVERAGE = 0.30  # candidates on a thin sliver of valid data are dropped as "Insufficient Evidence"
 MIN_STORED_CONFIDENCE = 0.3  # candidates scoring below this are not stored at all
 MAX_STORED_CANDIDATES = 5000  # safety cap per pair; the API shows at most DISPLAY_CAP_PER_JOB of them
+# When the cap bites, this many of the slots go to the LARGEST detections whatever their confidence, so the cap can
+# never drop the biggest changes (the ones an analyst sorts by area to find). The rest go to the most confident.
+STORED_AREA_RESERVE = 500
 DISPLAY_CAP_PER_JOB = 200  # candidates shown per pair, highest confidence first
 NDVI_DROP_SIG = 0.15  # |mean dNDVI| above this labels a blob vegetation gain/loss
 

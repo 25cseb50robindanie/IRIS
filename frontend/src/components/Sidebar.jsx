@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
-import { Layers, AlertCircle, Loader2, Search, Crosshair, ScanSearch } from "lucide-react";
+import { Layers, AlertCircle, Loader2, Search, Crosshair, ScanSearch, Images } from "lucide-react";
+import { boundsMgrs, spacedMgrs } from "../mgrs";
 import ChangeResults from "./ChangeResults";
 import SectionHeader from "./SectionHeader";
 import WorkspaceStatus from "./WorkspaceStatus";
@@ -16,11 +17,17 @@ export default function Sidebar({
   onDismissPipeline,
   // semantic results of the last search
   searchError = null,
+  searchErrorTitle = "Search failed",
+  busyWith = "search",
   searchResults = [],
   searchQuery = "",
   isSearching = false,
   selectedTileId = null,
   onSelectResult,
+  // "Find Similar": the results are then tiles like a chosen one, not matches for the query
+  similarTo = null,
+  similarKey = 0,
+  onFindSimilar,
   // change results: the unified search's change half, and the browsable list of every detected change
   search = null,
   searchCount = 0,
@@ -42,6 +49,11 @@ export default function Sidebar({
     setSemanticOverride(null);
     setChangeOverride(null);
   }, [searchCount]);
+
+  // Similar-tile results are what the analyst just asked for: open the section whatever the change results are doing
+  useEffect(() => {
+    if (similarKey > 0) setSemanticOverride(true);
+  }, [similarKey]);
 
   const hasChangeResults = search?.hasSearched ? (search.results?.length ?? 0) > 0 : (changes?.total ?? 0) > 0;
   const semanticOpen = semanticOverride ?? !hasChangeResults;
@@ -87,28 +99,54 @@ export default function Sidebar({
               {isSearching && (
                 <div className="bg-neutral-50 border border-neutral-200 rounded-[3px] p-4 text-center">
                   <Loader2 className="w-5 h-5 animate-spin text-neutral-600 mx-auto mb-1.5" />
-                  <div className="text-xs font-medium text-neutral-700">Encoding Query via RemoteCLIP...</div>
-                  <div className="text-[11px] text-neutral-400 mt-0.5">Searching tiles and detected changes</div>
+                  <div className="text-xs font-medium text-neutral-700">
+                    {busyWith === "similar" ? "Finding similar tiles..." : "Encoding Query via RemoteCLIP..."}
+                  </div>
+                  <div className="text-[11px] text-neutral-400 mt-0.5">
+                    {busyWith === "similar" ? "Comparing embeddings across the archive" : "Searching tiles and detected changes"}
+                  </div>
                 </div>
               )}
 
               {!isSearching && searchResults.length > 0 && (
                 <div className="space-y-2">
-                  <div className="text-[11px] text-neutral-500 font-sans italic truncate" title={searchQuery}>
-                    Query: "{searchQuery}"
-                  </div>
+                  {similarTo ? (
+                    <div
+                      className="text-[11px] text-neutral-700 font-sans font-medium truncate"
+                      title={similarTo.label}
+                      data-testid="similar-label"
+                    >
+                      {similarTo.label}
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-neutral-500 font-sans italic truncate" title={searchQuery}>
+                      Query: "{searchQuery}"
+                    </div>
+                  )}
 
                   <div className="space-y-1.5">
                     {searchResults.map((res, idx) => {
                       const isSelected = selectedTileId === res.tile_id;
                       const scorePercent = (res.score * 100).toFixed(1);
+                      const mgrsRef = res.mgrs || boundsMgrs(res.bounds);
+                      const select = () => onSelectResult && onSelectResult(res);
 
+                      // A div, not a button: the card holds its own Find Similar button, and buttons cannot nest
                       return (
-                        <button
+                        <div
                           key={res.tile_id || idx}
-                          type="button"
-                          onClick={() => onSelectResult && onSelectResult(res)}
-                          className={`w-full text-left p-2 rounded-[3px] border transition-all ${
+                          role="button"
+                          tabIndex={0}
+                          onClick={select}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              select();
+                            }
+                          }}
+                          data-testid="semantic-card"
+                          data-tile-id={res.tile_id}
+                          className={`w-full text-left p-2 rounded-[3px] border transition-all cursor-pointer ${
                             isSelected
                               ? "bg-emerald-50/80 border-emerald-400 ring-1 ring-emerald-400 shadow-sm"
                               : "bg-white border-neutral-200 hover:border-neutral-300 hover:bg-neutral-50/80"
@@ -143,8 +181,33 @@ export default function Sidebar({
                               <span className="font-sans text-neutral-400">Tile: </span>
                               <span className="text-neutral-700">{res.tile_id}</span>
                             </div>
+                            {mgrsRef && (
+                              <div className="truncate" title={`MGRS ${mgrsRef}`} data-testid="semantic-mgrs">
+                                <span className="font-sans text-neutral-400">MGRS: </span>
+                                <span className="text-neutral-700">{spacedMgrs(mgrsRef)}</span>
+                              </div>
+                            )}
                           </div>
-                        </button>
+
+                          {onFindSimilar && (
+                            <div className="mt-1.5 flex justify-end">
+                              <button
+                                type="button"
+                                title="Find similar: the 10 tiles that look most like this one"
+                                aria-label="Find similar"
+                                data-testid="find-similar-tile"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onFindSimilar({ tileId: res.tile_id });
+                                }}
+                                className="flex items-center space-x-1 px-1.5 py-0.5 text-[10px] text-neutral-600 border border-neutral-200 rounded-[3px] bg-white hover:bg-neutral-100"
+                              >
+                                <Images className="w-3 h-3" />
+                                <span>Find Similar</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       );
                     })}
                   </div>
@@ -155,7 +218,9 @@ export default function Sidebar({
                 <div className="bg-red-50 border border-red-200 rounded-[3px] p-2.5 flex items-start space-x-2 text-xs text-red-800">
                   <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
                   <div className="min-w-0 flex-1">
-                    <div className="font-medium">Search failed</div>
+                    <div className="font-medium" data-testid="search-error-title">
+                      {searchErrorTitle}
+                    </div>
                     <div className="text-[11px] text-red-600 mt-0.5 break-words">{searchError}</div>
                   </div>
                 </div>
@@ -183,6 +248,7 @@ export default function Sidebar({
           onViewChange={onChangeView}
           selectedChangeId={selectedChangeId}
           onOpenChange={onOpenChange}
+          onFindSimilar={onFindSimilar}
           open={changeOpen}
           onToggle={() => setChangeOverride(!changeOpen)}
         />

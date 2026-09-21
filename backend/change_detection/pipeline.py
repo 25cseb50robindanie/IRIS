@@ -17,6 +17,8 @@ from typing import Any, Dict, Optional
 import rasterio
 from rasterio.enums import Resampling
 
+import instrumentation
+
 from catalog import changes as jobs
 from catalog.database import get_scene, init_connection, init_schema
 from change_detection import params
@@ -30,10 +32,11 @@ from change_detection.alignment import (
 )
 from change_detection.detection import detect_changes
 from change_detection.direction import classify_candidates
+from change_detection.grouping import assign_groups, attach_geometry, merge_candidates
 from change_detection.masking import build_validity
 from change_detection.radiometry import fit_normalization
 from change_detection.rasters import SceneReader, bands_summary, grid_signature, grids_match, mgrs_tile_id
-from change_detection.scoring import score_candidates
+from change_detection.scoring import finalize_candidates, score_candidates
 
 logger = logging.getLogger("iris.change.pipeline")
 
@@ -146,6 +149,9 @@ def _execute(job_id: int, scene_a: Dict[str, Any], scene_b: Dict[str, Any]) -> D
         details["phase"] = "done"
         timings["total"] = round(now - t_start, 2)
         _finish(job_id, status, details, error, candidates)
+        instrumentation.record_change_detection(
+            job_id, scene_a["scene_id"], scene_b["scene_id"], dict(timings), status, len(candidates or [])
+        )
         return {"job_id": job_id, "status": status, "candidates": len(candidates or []), "error": error}
 
     try:
@@ -231,6 +237,10 @@ def _execute(job_id: int, scene_a: Dict[str, Any], scene_b: Dict[str, Any]) -> D
             det = detect_changes(reader_a, reader_b, mutual, norm, work_dir)
             details["detection"] = det.trace
 
+        # ---- Grouping: which surviving blobs belong to one detection (mask dilation; geometry stays undilated) ----
+        phase("grouping")
+        details["grouping"] = assign_groups(det)
+
         # ---- Phase 5: scoring -----------------------------------------------------------------------------
         phase("scoring")
         with rasterio.open(str(paths_a["analysis"])) as src:
@@ -243,6 +253,12 @@ def _execute(job_id: int, scene_a: Dict[str, Any], scene_b: Dict[str, Any]) -> D
         # ---- Phase 4b: direction and refined change type for every surviving blob ---------------------------
         phase("direction")
         details["direction"] = classify_candidates(det, candidates)
+
+        # ---- One detection per group: merge, apply the storage threshold, trace the outline ---------------
+        phase("merging")
+        candidates = finalize_candidates(merge_candidates(candidates, crs), score_trace)
+        attach_geometry(det, candidates, transform, crs)
+        details["grouping"]["detections"] = len(candidates)
         return finish(jobs.JOB_COMPLETED, candidates=candidates)
 
     except InsufficientEvidence as e:

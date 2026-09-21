@@ -41,6 +41,9 @@ class Detection:
     class_a: Optional[np.ndarray] = None
     class_b: Optional[np.ndarray] = None
     dbright: Optional[np.ndarray] = None
+    group_of: Optional[np.ndarray] = None  # detection group per blob label (grouping.assign_groups)
+    group_large: Optional[np.ndarray] = None  # bool per blob label: merged by the large-area pass
+    group_radius: Optional[np.ndarray] = None  # dilation (px) that produced each blob's group
 
 
 def _parse_offsets(tags: dict, count: int) -> List[float]:

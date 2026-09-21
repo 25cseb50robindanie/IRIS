@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from catalog import changes as store
 from catalog.database import get_scene, init_connection, init_schema
 from change_detection import params
+from api.provenance import analysed_area, display_bounds, intersect, trace_lines
 from change_detection.direction import CHANGE_TYPES, DIRECTIONS
 from ingestion.loader import read_raster_bounds
 
@@ -33,6 +34,15 @@ class CandidateSummary(BaseModel):
     area_px: Optional[int] = None
     mean_dndvi: Optional[float] = None
     review_status: str  # pending | confirmed | rejected
+    mgrs: Optional[str] = None  # 10-digit MGRS reference of the detection's centroid
+    centroid: Optional[List[float]] = None  # [lon, lat] of the changed pixels (None before it was traced)
+    sub_blobs: int = 1  # change blobs merged into this detection
+
+
+class AnalysedArea(BaseModel):
+    """The ground the analysed pairs cover, for negative evidence."""
+    bounds: Optional[List[float]] = None  # [min_lon, min_lat, max_lon, max_lat]
+    mgrs: Optional[str] = None
 
 
 class PairInfo(BaseModel):
@@ -59,6 +69,7 @@ class CandidateList(BaseModel):
     candidates: List[CandidateSummary]
     pairs: List[PairInfo]
     thresholds: Dict[str, Any] = {}  # what 'no significant change' was measured against
+    area: AnalysedArea = AnalysedArea()  # where the analysed pairs overlap
 
 
 class SceneRef(BaseModel):
@@ -85,9 +96,17 @@ class ReviewEntry(BaseModel):
     reviewed_at: str
 
 
+class TraceLine(BaseModel):
+    key: str
+    label: str
+    text: str
+
+
 class CandidateDetail(CandidateSummary):
     """Full detail for one candidate: both scenes, the confidence breakdown, and the decision trace."""
     bounds_native: List[float]
+    display_bounds: List[float]  # 4x the box, clamped to the scene extent: the window the before/after view opens on
+    processing_details: List[TraceLine] = []  # the decision trace as sentences, in pipeline order
     scene_a: SceneRef
     scene_b: SceneRef
     confidence_breakdown: Dict[str, ConfidenceTerm]
@@ -133,6 +152,9 @@ def _summary(c: Dict[str, Any]) -> CandidateSummary:
         area_px=c["area_px"],
         mean_dndvi=c["mean_dndvi"],
         review_status=c["review_status"],
+        mgrs=c.get("mgrs_ref"),
+        centroid=[c["centroid_lon"], c["centroid_lat"]] if c.get("centroid_lon") is not None else None,
+        sub_blobs=c.get("sub_blobs") or 1,
     )
 
 
@@ -162,6 +184,7 @@ DETECTION_THRESHOLDS = {
     "minimum_confidence": params.MIN_STORED_CONFIDENCE,
 }
 SORTS = ("confidence", "area", "date")
+DISPLAY_WINDOW_FACTOR = 4.0  # the before/after view shows 4x the box's width and height (1.5 boxes of context per side)
 
 
 @router.get("/changes", response_model=CandidateList)
@@ -175,7 +198,8 @@ def list_changes(
 ) -> CandidateList:
     """Change candidates with the analyst's filters applied, plus the list of analysed pairs.
 
-    The cap is per pair and always keeps the highest-confidence candidates; `sort` only orders what is shown.
+    The cap is per pair and keeps the strongest candidates by the chosen `sort`: the highest-confidence ones, or with
+    sort=area the largest ones (so the biggest changes are never cut for having a modest confidence).
     """
     wanted = None
     if types:
@@ -204,6 +228,7 @@ def list_changes(
             else stored
         )
         rows = [r for r in after_types if r["confidence"] >= min_confidence]
+        area = analysed_area(conn, [j for j in scope if j["status"] == store.JOB_COMPLETED])
         per_job_stored: Dict[int, int] = {}
         for r in stored:
             per_job_stored[r["job_id"]] = per_job_stored.get(r["job_id"], 0) + 1
@@ -220,7 +245,8 @@ def list_changes(
     # Per-pair cap on the strongest candidates (rows arrive strongest first), then the requested display order
     taken: List[Dict[str, Any]] = []
     counts: Dict[int, int] = {}
-    for r in rows:
+    ranked = sorted(rows, key=lambda r: (-(r["area_px"] or 0), -r["confidence"])) if sort == "area" else rows
+    for r in ranked:
         if counts.get(r["job_id"], 0) < limit:
             counts[r["job_id"]] = counts.get(r["job_id"], 0) + 1
             taken.append(r)
@@ -254,6 +280,7 @@ def list_changes(
         candidates=[_summary(r) for r in taken],
         pairs=pairs,
         thresholds=DETECTION_THRESHOLDS,
+        area=AnalysedArea(**area),
     )
 
 
@@ -312,8 +339,13 @@ def get_change(candidate_id: int) -> CandidateDetail:
     breakdown = {
         name: ConfidenceTerm(value=v, weight=w[name], contribution=v * w[name]) for name, v in values.items()
     }
+    box = [cand["min_lon"], cand["min_lat"], cand["max_lon"], cand["max_lat"]]
+    # The window opens on the ground both scenes cover; if only one extent is known, that one
+    extent = intersect(scene_a.bounds_wgs84, scene_b.bounds_wgs84) or scene_b.bounds_wgs84 or scene_a.bounds_wgs84
     return CandidateDetail(
         **_summary(cand).model_dump(),
+        display_bounds=display_bounds(box, extent, DISPLAY_WINDOW_FACTOR),
+        processing_details=[TraceLine(**line) for line in trace_lines(job_details, cand)],
         bounds_native=[cand["min_x"], cand["min_y"], cand["max_x"], cand["max_y"]],
         scene_a=scene_a,
         scene_b=scene_b,

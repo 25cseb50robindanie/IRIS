@@ -37,15 +37,7 @@ def score_candidates(
     """Score every surviving blob. Returns (candidate rows ready for the catalog, trace figures)."""
     trace: Dict[str, Any] = {"terrain": "placeholder: flat (no DEM loaded)"}
     if det.labels is None or det.keep is None or not det.keep.any():
-        trace.update(
-            {
-                "candidates": 0,
-                "candidates_found": 0,
-                "dropped_insufficient_evidence": 0,
-                "dropped_low_confidence": 0,
-                "dropped_over_cap": 0,
-            }
-        )
+        trace.update({"blobs_scored": 0, "dropped_insufficient_evidence": 0})
         return [], trace
 
     labels, keep = det.labels, det.keep
@@ -72,15 +64,23 @@ def score_candidates(
             cnt_dn += np.bincount(lab_sel[ok], minlength=n + 1)
 
     # NormClusterDist: each blob's mean distance from the no-change centroid, ranked against the OTHER BLOBS of this
-    # pair (0.0 = weakest change, 1.0 = strongest). Ranking against pixels instead lets a few large blobs own most of
+    # pair (0.0 = weakest change, 1.0 = strongest; see `pool` below for what a blob is ranked against once merged). Ranking against pixels instead lets a few large blobs own most of
     # the pixels, which pins every blob's mean near the top. A tied or lone blob gets the mid-rank, never 1.0.
     kept_labels = np.flatnonzero(keep)
     blob_means = sum_d[kept_labels] / det.areas[kept_labels]
-    sorted_means = np.sort(blob_means)
+    pool = blob_means
+    if det.group_of is not None:
+        # Blobs are merged into detections afterwards and a detection takes its best blob's score, so the rank is
+        # taken among one value per detection (its strongest blob). Ranking against every fragment would let a
+        # fractured weak change borrow the rank of its best piece and squeeze the whole scale toward the top.
+        group_ids = det.group_of[kept_labels]
+        peak = np.zeros(int(group_ids.max()) + 1)
+        np.maximum.at(peak, group_ids, blob_means)
+        pool = peak[np.unique(group_ids)]
+    sorted_means = np.sort(pool)
 
     rows_out: List[Dict[str, Any]] = []
     dropped_coverage = 0
-    dropped_confidence = 0
     for label in kept_labels:
         sl = det.objects[label - 1]
         area = int(det.areas[label])
@@ -101,10 +101,6 @@ def score_candidates(
             + w["terrain_flatness"] * params.TERRAIN_FLATNESS_PLACEHOLDER
             + w["valid_coverage"] * coverage
         )
-
-        if confidence < params.MIN_STORED_CONFIDENCE:
-            dropped_confidence += 1
-            continue
 
         row0, row1, col0, col1 = sl[0].start, sl[0].stop, sl[1].start, sl[1].stop
         left, bottom, right, top = window_bounds(Window(col0, row0, col1 - col0, row1 - row0), transform)
@@ -131,7 +127,10 @@ def score_candidates(
                 "change_type": "unclassified",  # named by Phase 4b (direction.classify_candidates)
                 "direction": None,
                 "direction_evidence": None,
-                "blob_label": int(label),  # lets Phase 4b find this blob's pixels; removed before storage
+                "blob_label": int(label),  # lets Phase 4b find this blob's pixels; removed once blobs are merged
+                "group_id": int(det.group_of[label]) if det.group_of is not None else 0,
+                "group_large": bool(det.group_large[label]) if det.group_large is not None else False,
+                "group_radius": int(det.group_radius[label]) if det.group_radius is not None else 0,
                 "confidence": confidence,
                 "norm_rmse": None,
                 "norm_cluster_dist": cluster_pct,
@@ -144,14 +143,34 @@ def score_candidates(
         )
 
     rows_out.sort(key=lambda r: (-r["confidence"], -r["area_px"]))
-    found = len(rows_out) + dropped_confidence  # blobs that passed the MMU and coverage floor
-    over_cap = max(0, len(rows_out) - params.MAX_STORED_CANDIDATES)
-    rows_out = rows_out[: params.MAX_STORED_CANDIDATES]
+    trace.update({"blobs_scored": len(rows_out), "dropped_insufficient_evidence": dropped_coverage})
+    logger.info("Scored %d blobs (%d dropped on thin coverage)", len(rows_out), dropped_coverage)
+    return rows_out, trace
+
+
+def finalize_candidates(rows: List[Dict[str, Any]], trace: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Apply the storage threshold and the safety cap to the merged detections, and complete the trace.
+
+    Done after merging, on purpose: a detection's confidence is the highest of its blobs, so a weak fragment that
+    belongs to a strong detection is kept with it instead of vanishing before the merge.
+    """
+    kept = [r for r in rows if r["confidence"] >= params.MIN_STORED_CONFIDENCE]
+    dropped_confidence = len(rows) - len(kept)
+    kept.sort(key=lambda r: (-r["confidence"], -r["area_px"]))
+    over_cap = max(0, len(kept) - params.MAX_STORED_CANDIDATES)
+    if over_cap:
+        reserve = min(params.STORED_AREA_RESERVE, params.MAX_STORED_CANDIDATES)
+        largest = sorted(range(len(kept)), key=lambda i: -kept[i]["area_px"])[:reserve]
+        keep_idx = set(largest)
+        for i in range(len(kept)):  # then fill the remaining slots by confidence
+            if len(keep_idx) >= params.MAX_STORED_CANDIDATES:
+                break
+            keep_idx.add(i)
+        kept = [kept[i] for i in sorted(keep_idx)]  # still in confidence order
     trace.update(
         {
-            "candidates": len(rows_out),
-            "candidates_found": found,
-            "dropped_insufficient_evidence": dropped_coverage,
+            "candidates": len(kept),
+            "candidates_found": len(rows),  # detections that passed the MMU and coverage floor
             "dropped_low_confidence": dropped_confidence,
             "dropped_over_cap": over_cap,
             "confidence_weights": params.CONFIDENCE_WEIGHTS,
@@ -159,11 +178,10 @@ def score_candidates(
         }
     )
     logger.info(
-        "Scored %d candidates (%d below confidence %.2f, %d on thin coverage, %d over cap)",
-        len(rows_out),
+        "Detections: %d stored (%d below confidence %.2f, %d over cap)",
+        len(kept),
         dropped_confidence,
         params.MIN_STORED_CONFIDENCE,
-        dropped_coverage,
         over_cap,
     )
-    return rows_out, trace
+    return kept
