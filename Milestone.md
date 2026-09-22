@@ -1,6 +1,6 @@
 # IRIS Project Milestones & Execution Log
 
-**System Designation:** IRIS (Intelligent Retrieval & Imagery Surveillance)  
+**System Designation:** IRIS (Intelligent Retrieval & Interpretation System)  
 **Problem Statement ID:** 26227 — *Semantic Retrieval and Multi-Temporal Change Analysis of Satellite Imagery*  
 **Issuing Authority:** Ministry of Defence / Indian Army (DGIS)  
 

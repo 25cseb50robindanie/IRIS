@@ -1,213 +1,264 @@
 # IRIS: Intelligent Retrieval & Interpretation System
 
-> **Offline Desktop System for Semantic Retrieval and Multi-Temporal Change Analysis of Satellite Imagery**  
-> *Developed for Smart India Hackathon (SIH) — Problem Statement ID: 26227*  
-> *Proponent Organization: Ministry of Defence / Indian Army (DGIS)*
+<div align="center">
+  <img src="docs/screenshots/iris_logo.png" alt="IRIS Insignia" width="130" />
+  <br />
+  <strong>Offline Desktop Platform for Semantic Retrieval and Multi-Temporal Change Analysis of Satellite Imagery</strong>
+  <br />
+  <em>Smart India Hackathon (SIH) — Problem Statement ID: 26227</em>
+  <br />
+  <strong>Proponent Organization: Ministry of Defence / Indian Army (DGIS)</strong>
+</div>
 
 ---
 
-## 1. Problem Statement
+## 📋 Table of Contents
+1. [Problem Statement & Mandatory Submission Checklist](#1-problem-statement--mandatory-submission-checklist)
+2. [Project Overview & Solution Summary](#2-project-overview--solution-summary)
+3. [Architecture Note](#3-architecture-note)
+4. [Index Build Procedure](#4-index-build-procedure)
+5. [Incremental Ingestion Procedure](#5-incremental-ingestion-procedure)
+6. [Model Provenance](#6-model-provenance)
+7. [Dataset Provenance](#7-dataset-provenance)
+8. [Reproducible Evaluation Report](#8-reproducible-evaluation-report)
+9. [Setup & Execution Guide](#9-setup--execution-guide)
+10. [Visual Demonstration & Screenshots](#10-visual-demonstration--screenshots)
+11. [Deep-Dive Documentation & Technical Dossiers](#11-deep-dive-documentation--technical-dossiers)
+
+---
+
+## 1. Problem Statement & Mandatory Submission Checklist
 
 * **Problem Statement ID:** `26227`
 * **Title:** Semantic Retrieval and Multi-Temporal Change Analysis of Satellite Imagery
 * **Category:** Software / National Security / Geospatial Intelligence
-* **Proponent:** Ministry of Defence / Indian Army (DGIS)
-* **Team ID:** 151016
+* **Proponent Organization:** Ministry of Defence / Indian Army (DGIS)
+* **Team ID:** `151016`
 * **Team Name:** MIND SPARK
 
+### Operational Challenge
+Earth-observation archives are expanding rapidly with multi-temporal, multi-spectral, and multi-sensor imagery from constellations such as Sentinel, Landsat, and Bhuvan. Conventional military catalogues index data solely by static metadata (coordinates, bounding boxes, timestamps, and sensor tags). This forces defence analysts to know *where* and *when* an activity occurred before finding imagery. Analysts cannot search archives by **semantic meaning** (e.g., *"forward helicopter landing pad in mountainous valley"* or *"trench fortification network near highway"*).
 
-### Background & Operational Challenge
-Earth-observation archives are expanding exponentially with multi-temporal, multi-spectral, and multi-sensor acquisitions from constellations such as Sentinel, Landsat, and Bhuvan. Conventional military and defense geospatial catalogues are indexed strictly by static metadata—coordinates, bounding boxes, acquisition dates, sensor models, and product levels. While effective when the analyst already knows *where* and *when* an event occurred, analysts cannot query archives by **semantic meaning** (e.g., *"new forward airstrip construction in arid terrain"* or *"floating pontoon bridge deployment along river corridor"*).
+Furthermore, conventional GIS change detection algorithms suffer from crippling false-alarm rates triggered by cloud edges, seasonal foliage shifts, terrain shadows, and sub-pixel registration jitter.
 
-Furthermore, multi-temporal change detection algorithms in existing GIS tools produce intolerable rates of false alarms caused by cloud edges, seasonal phenology cycles, sun-angle shifts, and sub-pixel geometric registration jitter. Translating recent foundation-model breakthroughs into a reliable operational system requires:
-1. Complete, air-gapped **offline execution** on portable field workstations.
-2. An **explainable, non-black-box change engine** satisfying defence accountability standards.
-3. True **incremental ingestion** without full index recomputations.
-4. Rigorous preservation of **geospatial and analytical provenance**.
+### Submission Deliverables Compliance Matrix
+The problem statement evaluation explicitly mandates the following deliverables:
 
----
-
-## 2. Project Overview
-
-**IRIS (Intelligent Retrieval & Imagery Surveillance)** is a standalone, offline desktop application engineered to turn vast, unlabelled satellite imagery archives into an intuitively searchable, explainable intelligence platform.
-
-### Core Capabilities
-* **Natural-Language Semantic Retrieval:** Free-text natural language queries powered by a domain-specialized RemoteCLIP vision-language model, searching the archive by human meaning without manual annotation.
-* **Image-to-Image Visual Similarity:** "Find Similar Sites" allows an analyst to select any land-use pattern (e.g., military encampment, radar site, deforestation patch) and instantly discover matching sites across all indexed dates and footprints.
-* **5-Phase Explainable Change Engine:** Replaces black-box deep learning differencing with an auditable physical pipeline: native categorical quality masking, sub-pixel grid co-registration, radiometric normalization (TASC & PIF), block-PCA/K-Means difference clustering, and multi-spectral index directional classification.
-* **Directional Change Classification:** Automatically classifies candidate features into physical categories: **Appearance**, **Disappearance**, **Expansion**, or **Contraction**, coupled with spectral index deltas (ΔNDBI, ΔNDVI, ΔMNDWI).
-* **Analyst Review Queue & Provenance Audit Trail:** Interactive validation UI for intelligence officers to verify, reject, flag, or monitor changes with one-click **GeoJSON audit exports** and printable **Visual Evidence Dossiers**.
-* **100% Offline Desktop Shell:** Zero external network calls. Bundled as a native Windows desktop application with native OS file dialogs and an embedded local tile server.
-
----
-
-## 3. Solution Summary
-
-| Subsystem | Technology | Purpose & Architectural Rationale |
+| Required Deliverable | Description & Compliance in IRIS | Primary Reference File |
 |---|---|---|
-| **Desktop Shell** | **Electron** | Native Windows desktop application with sandboxed IPC and native Windows Explorer file/folder picker dialogs. |
-| **User Interface** | **React + TailwindCSS + MapLibre GL** | QGIS-inspired intelligence console with real-time vector tile rendering and split-screen before/after comparison slider. |
-| **Application Server** | **FastAPI (Python)** | High-performance asynchronous backend bound exclusively to `127.0.0.1:8000`. |
-| **Raster Engine** | **GDAL / Rasterio / TiTiler** | Memory-bounded streaming raster windowing and on-demand local XYZ tile serving from Cloud-Optimized GeoTIFFs (COGs). |
-| **Embedding Model** | **RemoteCLIP (ViT-B/32)** | Domain-adapted satellite foundation model mapping 224×224px surface crops into a 512-dimensional joint semantic space. |
-| **Vector Engine** | **FAISS (HNSW)** | Hierarchical Navigable Small World vector graph enabling sub-100ms similarity lookups with dynamic vector insertion. |
-| **Metadata & Spatial Catalog** | **SQLite (WAL + R-Tree)** | Embedded, serverless relational catalog with R-Tree spatial indexing, Write-Ahead Logging concurrency, and MGRS grid coordinates. |
+| **Source Code** | Complete standalone desktop application (Electron, React, FastAPI, GDAL, FAISS, PyTorch). Fully self-contained on `127.0.0.1`. | [`frontend/`](frontend/), [`backend/`](backend/) |
+| **Architecture Note** | Exhaustive systems design note detailing non-black-box 5-phase change pipeline, memory bounds, air-gapped sovereignty, and ADRs. | [Architecture Note (`architecture.md`)](architecture.md) |
+| **Index-Build Procedure** | Formal specification of 224×224px surface tiling, valid-pixel gating, RemoteCLIP ViT-B/32 inference, and dynamic FAISS HNSW graph indexing. | [Section 4](#4-index-build-procedure) & [`architecture.md`](architecture.md#7-three-independent-tiling-concepts--deliberately-not-unified-stated-explicitly-to-prevent-confusion) |
+| **Incremental Ingestion** | Dynamic single-scene and temporal overlapping-pair ingestion with automatic chronological baseline pairing and zero index rebuilds. | [Section 5](#5-incremental-ingestion-procedure) & [`architecture.md`](architecture.md#ingestion-workflow-2--importing-dataset-b-subsequent-overlapping-scene) |
+| **Model Provenance** | Pre-training methodology, foundation model backbone (RemoteCLIP ViT-B/32), weight origins, licensing, and local offline deployment. | [Section 6](#6-model-provenance) & [`documentation.md`](documentation.md#part-7--model-provenance--foundation-model-specifications) |
+| **Dataset Provenance** | Detailed sensors (Sentinel-2 L2A, Landsat Collection 2, CartoDEM 30m, OSCD), band mappings, resolutions, and open access licences. | [Section 7](#7-dataset-provenance) & [`documentation.md`](documentation.md#part-8--dataset-provenance--satellite-sensor-specifications) |
+| **Reproducible Evaluation Report** | Live-measured benchmarks: indexed area, scene/tile counts, build time, storage footprint, query latency, and hardware specs. | [Section 8](#8-reproducible-evaluation-report) & [`backend/data/eval_manifest.json`](backend/data/eval_manifest.json) |
 
 ---
 
-## 4. Architecture Note
+## 2. Project Overview & Solution Summary
 
-> 📄 **Complete Technical Document:** Read the full [Architecture Note & Systems Design Specification](architecture.md).
+**IRIS (Intelligent Retrieval & Interpretation System)** is a zero-cloud, 100% offline desktop application that empowers defence intelligence analysts to search, interpret, and track physical ground transformations across multi-temporal satellite archives.
 
-### Architecture Requirements Summary
-1. **Air-Gapped Operational Sovereignty:** Hard constraint: zero network traffic permitted outside `127.0.0.1`. All foundation model weights, tile services, spatial lookups, and Python wheels run self-contained locally.
-2. **Explainable Non-Black-Box Pipeline:** Deep learning end-to-end change detection models hallucinate and fail defence verification standards. IRIS computes an explainable 4-term confidence score:
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                                IRIS DESKTOP ENVIRONMENT                                │
+│                                                                                        │
+│   ┌───────────────────────────────────┐        ┌───────────────────────────────────┐   │
+│   │        ELECTRON DESKTOP UI        │        │        FASTAPI LOCAL DAEMON       │   │
+│   │  • MapLibre GL Raster Rendering   │  HTTP  │  • TiTiler Dynamic XYZ Tile Mount │   │
+│   │  • Dual-Pane Swipe Comparison     │ ◄────► │  • RemoteCLIP Embedding Pipeline  │   │
+│   │  • Natural Language Search Bar    │  JSON  │  • FAISS HNSW Vector Engine       │   │
+│   │  • Review Queue & Audit Dossier   │        │  • 5-Phase Change Detection       │   │
+│   └───────────────────────────────────┘        └───────────────────────────────────┘   │
+│                     │                                            │                     │
+│                     ▼                                            ▼                     │
+│        [Native Windows Dialogs]                       [Local Storage & Catalog]        │
+│        • FolderBrowserDialog (.SAFE)                  • SQLite WAL Spatial Catalog     │
+│        • OpenFileDialog (.TIF / .JP2)                 • Cloud-Optimized GeoTIFFs (COG) │
+│                                                       • FAISS Dynamic Index (.bin)     │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Solution Architecture Summary
+
+| Component | Technical Selection | Rationale & Architectural Significance |
+|---|---|---|
+| **App Shell** | **Electron (Windows x64)** | Bundled as a true native desktop application (`IRIS.exe`) with sandboxed native OS file dialogs and no browser dependency. |
+| **Mapping Engine** | **MapLibre GL** | High-performance raster canvas rendering XYZ tiles on localhost with zero external basemap dependencies. |
+| **Backend Engine** | **FastAPI (Python 3.12)** | Asynchronous headless service bound strictly to `127.0.0.1:8000`, running in background daemon mode. |
+| **Raster Pipeline** | **GDAL / Rasterio / TiTiler** | Memory-bounded streaming raster windowing (16–32px halos) with dynamic Cloud-Optimized GeoTIFF (COG) serving. |
+| **Foundation Model** | **RemoteCLIP (ViT-B/32)** | Remote sensing foundation model mapping 224×224px surface crops into a 512-dimensional joint semantic vector space. |
+| **Vector Search** | **FAISS (HNSW)** | Hierarchical Navigable Small World index allowing dynamic, incremental vector insertion and sub-85ms similarity lookups. |
+| **Relational Catalog** | **SQLite (WAL + R-Tree)** | Embedded catalog with Write-Ahead Logging concurrency, R-Tree spatial footprint indexing, and 10-digit MGRS coordinates. |
+| **Change Engine** | **5-Phase Physical Pipeline** | Non-black-box explainable change analysis with sub-pixel alignment, radiometric normalization, block-PCA/K-Means, and directional classification. |
+
+---
+
+## 3. Architecture Note
+
+> 📄 **Executive Architecture Document:** Refer to the full [Architecture Note & Systems Design Specification (`architecture.md`)](architecture.md).
+
+### Foundational Architectural Requirements
+1. **Air-Gapped Operational Sovereignty (100% Offline):** Zero telemetry, external scripts, or remote API calls. Runs fully disconnected on field laptops.
+2. **Explainable Non-Black-Box Pipeline:** Deep learning end-to-end models cannot explain *why* a change was triggered. IRIS computes an explainable 4-term confidence score:
    $$\text{Confidence} = 0.35 \times \text{NormRMSE} + 0.35 \times \text{NormClusterDist} + 0.15 \times \text{TerrainFlatness} + 0.15 \times \text{ValidCoverage}$$
-3. **Memory-Bounded Streaming Processing:** Raw 100 km × 100 km Sentinel-2 tiles unpack to gigabytes in memory. IRIS enforces overlapping strip-window processing (16–32px halo) to eliminate boundary truncation without exhausting workstation RAM.
-4. **Crash-Resilient State Machine:** All file creation follows atomic staging (`data/staging/` → atomic rename to `data/cogs/`). SQLite WAL mode prevents database locking, and an automated startup sweep reconciles interrupted tasks.
+3. **Memory-Bounded Streaming Processing:** Rather than allocating whole satellite scenes in memory (often >4 GB uncompressed), processing is streamed in overlapping strip windows (16–32px halo) using Rasterio block windows.
+4. **Crash-Resilience & Atomic Staging:** Files are generated in staging directories (`data/staging/`) and atomically renamed upon SQLite transaction commit (`BEGIN IMMEDIATE`). A startup sweep recovers interrupted jobs automatically.
 
 ---
 
-## 5. Index Build
+## 4. Index Build Procedure
 
-### Index-Build Procedure
-The semantic vector index is constructed incrementally during raster ingestion:
+The semantic vector index is populated incrementally through an automated tiling and feature extraction pipeline:
 
 ```
-Raw GeoTIFF / .SAFE Scene
-          │
-          ▼
-Universal Format Loader & Capability Audit
-          │
-          ▼
-Native Categorical Masking (SCL / QA_PIXEL)
-          │
-          ▼
-True-Color RGB Synthesis & COG Conversion
-          │
-          ▼
-Uniform 224×224px Grid Tiling (30% overlap)
-          │
-    ┌─────┴─────────────────────────────────┐
-    ▼                                       ▼
-Valid Pixel Fraction < 60%           Valid Pixel Fraction ≥ 60%
-    │                                       │
-[SKIPPED — Never embedded]            NaN Imputed to Neutral Mean
+                      Raw Satellite Product (.SAFE / GeoTIFF / JP2)
                                             │
                                             ▼
-                              RemoteCLIP ViT-B/32 Inference
+                       Universal Loader & Capability Audit
                                             │
                                             ▼
-                                512-D L2-Normalized Vector
+                    Native Quality Masking (SCL / QA_PIXEL)
                                             │
                                             ▼
-                                FAISS HNSW Dynamic Insertion
+                     RGB Synthesis & COG Conversion (512px)
+                                            │
+                                            ▼
+                     Uniform 224×224px Grid Tiling (30% stride)
+                                            │
+                      ┌─────────────────────┴─────────────────────┐
+                      ▼                                           ▼
+             Valid Pixels < 60%                          Valid Pixels ≥ 60%
+                      │                                           │
+         [DISCARDED — Never Indexed]                     NaN Neutral Mean Fill
+                                                                  │
+                                                                  ▼
+                                                    RemoteCLIP ViT-B/32 Encoder
+                                                                  │
+                                                                  ▼
+                                                      512-D L2-Normalized Vector
+                                                                  │
+                                                                  ▼
+                                                     FAISS HNSW Dynamic Insertion
 ```
 
-1. **Grid Tiling:** The scene's RGB composite is sliced into 224×224px crops matching the RemoteCLIP vision transformer receptive field.
-2. **NaN & Cloud Gate:** Any crop with less than 60% valid ground pixels (due to cloud, shadow, or sensor nodata) is discarded from the index to prevent poisoning the HNSW graph.
-3. **Inference & Insertion:** Crops are passed through the RemoteCLIP ViT-B/32 image encoder in batches. Output vectors are L2-normalized and added incrementally into the `IndexHNSWFlat` index, persisting vector position IDs into SQLite alongside MGRS coordinates.
+1. **Receptive Field Alignment:** Satellite rasters are segmented into 224×224px tiles matching the Vision Transformer patch dimensions.
+2. **Quality Gating:** Any crop with $<60\%$ valid pixels is discarded up-front, preventing cloud edges or nodata borders from corrupting the HNSW graph.
+3. **Vector Persistence:** Extracted 512-dimensional vectors are L2-normalized and appended to the FAISS index. Tile bounding boxes and MGRS coordinates are recorded into SQLite with the corresponding `faiss_id`.
 
 ---
 
-## 6. Incremental Ingestion
+## 5. Incremental Ingestion Procedure
 
-### Incremental-Ingestion Procedure
-IRIS eliminates monolithic re-indexing by implementing an incremental pipeline:
+IRIS supports continuous, zero-downtime archive growth without requiring full index rebuilds:
 
-1. **Ingestion Workflow 1 (Baseline Scene):**
-   * Scene dropped via the UI or folder import.
-   * Universal loader parses Sentinel-2 (.SAFE / JP2), Landsat Collection 2, or GeoTIFF.
-   * Bands normalized, reprojected, masked, and converted into Cloud-Optimized GeoTIFF format (`data/cogs/`).
-   * Semantic embedding crops generated and dynamically appended to the live FAISS index.
-   * Scene footprint and metadata registered in SQLite catalog with spatial R-Tree indexing.
+### Step 1: Single Scene Ingestion (Dataset A)
+1. **Drop & Detect:** User selects a file or directory via native Windows dialogs. Capability detector identifies sensor type, native bands, and CRS.
+2. **Quality Masking:** SCL/QA categorical cloud/shadow bands are parsed at native resolution.
+3. **COG Conversion:** Image is reprojected and written as an internally-tiled Cloud-Optimized GeoTIFF with overview pyramids.
+4. **Incremental Vector Append:** 224×224 crops are encoded and appended directly into the active FAISS HNSW graph.
+5. **Catalog Commit:** Scene footprint, MGRS grid code, and tile records are saved to SQLite under WAL mode. The scene immediately becomes browseable on MapLibre.
 
-2. **Ingestion Workflow 2 (Subsequent Overlapping Scene & Change Trigger):**
-   * Steps from Workflow 1 execute identically for Scene B.
-   * An R-Tree spatial intersection lookup queries the catalog for previous observations covering the same footprint **from the same sensor**.
-   * The nearest chronological prior observation is paired automatically as Scene A.
-   * The **5-Phase Change Detection Engine** is enqueued as an asynchronous background worker task:
-     * **Phase 1 (Quality Masking):** Mutual validity mask generated (AND operation) from Scene A and B masks.
-     * **Phase 2 (Co-Registration):** Sub-pixel geometric alignment using `cv2.findTransformECC` with correlation coefficient (`\rho`) gating and ORB+RANSAC fallback.
-     * **Phase 3 (Radiometric Normalization):** Topographic and solar incidence angle correction (TASC) using CartoDEM, plus Pseudo-Invariant Feature (PIF) linear regression.
-     * **Phase 4 (Difference & Clustering):** NIR difference channel decomposed via local block-PCA and clustered via K-Means ($K=2$).
-     * **Phase 4b (Direction Classification):** Independent classification component matching (IoU $\ge 0.5$) and signed index deltas ($\Delta\text{NDBI}, \Delta\text{NDVI}, \Delta\text{MNDWI}$) categorize changes into Appearance, Disappearance, Expansion, or Contraction.
-     * **Phase 5 (Filtering & Scoring):** Morphological opening/closing, multi-year historical persistence check to filter cyclical agriculture/seasonality, and 4-term confidence scoring.
+### Step 2: Multi-Temporal Pair Ingestion (Dataset B)
+1. Ingestion executes identically to Step 1 for the new acquisition.
+2. **R-Tree Footprint Query:** SQLite R-Tree queries for the nearest chronological prior scene covering the same footprint **from the same sensor**.
+3. **5-Phase Change Pipeline Enqueued (Background Task):**
+   * **Phase 1 (Mutual Masking):** Logical AND of Scene A and B masks isolates valid ground pixels.
+   * **Phase 2 (Co-Registration):** Rigid grid verification, followed by sub-pixel `cv2.findTransformECC` alignment ($\rho \ge 0.8$) and CartoDEM slope discounting.
+   * **Phase 3 (Radiometric Normalization):** Topographic sun-angle correction (TASC) and Pseudo-Invariant Feature (PIF) linear matching.
+   * **Phase 4 & 4b (Difference & Direction):** Block-PCA/K-Means difference clustering ($K=2$) on NIR channel. Multi-spectral index deltas ($\Delta\text{NDBI}, \Delta\text{NDVI}, \Delta\text{MNDWI}$) classify features into **Appearance**, **Disappearance**, **Expansion**, or **Contraction**.
+   * **Phase 5 (Persistence & Scoring):** Morphological opening/closing, multi-year historical persistence check to eliminate seasonal agricultural changes, and 4-term confidence scoring.
 
 ---
 
-## 7. Model Provenance
+## 6. Model Provenance
 
-### RemoteCLIP Foundation Model
-* **Backbone:** Vision Transformer ViT-B/32 (3-channel RGB, 224×224 pixel input, 512-dimensional embedding space).
-* **Pre-training:** Pre-trained on diverse remote sensing datasets by Liu et al., aligning natural language descriptions with aerial and satellite imagery across varied geographic biomes and ground resolutions.
-* **Weights & Framework:** Executed via `open_clip_torch` and PyTorch. Weights are packaged locally in `backend/models/` for 100% offline, air-gapped inference.
-* **Device Portability:** Automatically detects CUDA hardware for high-throughput acceleration; gracefully falls back to CPU SIMD vector execution (AVX2/AVX-512) on standard field laptops.
-* **Invariance:** Embeddings are L2-normalized, ensuring cosine similarity reduces to simple inner products in FAISS.
+* **Model Name:** RemoteCLIP (ViT-B/32)
+* **Architecture:** Vision Transformer (ViT-B/32 backbone, 12 layers, 768 hidden width, 12 attention heads).
+* **Embedding Dimensionality:** 512 dimensions (L2-normalized).
+* **Pre-training Pedigree:** Developed by Liu et al., RemoteCLIP is the first vision-language foundation model trained on massive remote sensing image-text pairs (spanning aerial and satellite platforms across diverse spatial resolutions and global biomes).
+* **Execution Framework:** `open_clip_torch` / PyTorch running 100% locally.
+* **Offline Deployment:** Model weights (`remoteclip_vitb32.pt`) are bundled locally within `backend/models/`. Zero external API calls or internet access required.
+* **Hardware Support:** Dynamic runtime detection: executes on CUDA GPUs when present; seamlessly falls back to CPU SIMD instructions (AVX2/AVX-512) on field workstations.
 
 ---
 
-## 8. Dataset Provenance
+## 7. Dataset Provenance
 
-IRIS is validated on open-access, publicly accessible earth-observation sources:
+IRIS is validated on open-access satellite earth-observation products under sovereign, public-access licences:
 
-| Dataset | Sensor / Platform | Native Resolution | Bands Used | Licence / Attribution |
+| Dataset | Sensor / Platform | Spatial Resolution | Bands Utilized | Licence & Access Model |
 |---|---|---|---|---|
-| **Sentinel-2 L2A** | MSI (Multi-Spectral Instrument) | 10m / 20m | B02 (Blue), B03 (Green), B04 (Red), B08 (NIR), B11 (SWIR), SCL (Scene Classification) | Copernicus Open Access Policy (Free & Open) |
-| **Landsat Collection 2** | OLI/TIRS (Landsat 8 & 9) | 15m / 30m | B02, B03, B04, B05, B06, QA_PIXEL | USGS / NASA Public Domain |
-| **CartoDEM** | Cartosat-1 (ISRO) | 30m posting | Surface Elevation & Derived Slope Angle | ISRO / NRSC Bhuvan Open Products |
-| **OSCD Benchmark** | Sentinel-2 Multi-Temporal | 10m / 20m | Multi-temporal registered pairs across 24 global cities | Onera Satellite Change Detection Benchmark |
+| **Sentinel-2 L2A** | MSI (Multi-Spectral Instrument) | 10m / 20m | B02 (Blue), B03 (Green), B04 (Red), B08 (NIR), B11 (SWIR-1), SCL (Scene Classification) | Copernicus Open Access Policy (Free, Full & Open) |
+| **Landsat Collection 2** | OLI/TIRS (Landsat 8 & 9) | 15m / 30m | B02, B03, B04, B05, B06, QA_PIXEL | USGS / NASA Open Data Policy |
+| **CartoDEM** | Cartosat-1 (ISRO) | 30m posting | Surface elevation raster & derived topographic slope angle | ISRO / NRSC Bhuvan Open Data Products |
+| **OSCD Benchmark** | Sentinel-2 Multi-Temporal | 10m / 20m | Registered multi-temporal pairs over 24 global urban centres | Onera Satellite Change Detection Benchmark |
 
 ---
 
-## 9. Evaluation Report
+## 8. Reproducible Evaluation Report
 
-Measurements recorded live by the built-in evaluation instrumentation framework (`backend/data/eval_manifest.json`):
+> 📊 **Raw Telemetry Source:** Benchmark data is recorded automatically by the instrumentation engine in [`backend/data/eval_manifest.json`](backend/data/eval_manifest.json).
 
-### 9.1 Evaluation Hardware & Environment
-* **Workstation CPU:** AMD Ryzen 7 250 w/ Radeon 780M Graphics (8 physical cores, 16 logical threads)
-* **System Memory:** 15.3 GB Total RAM
-* **Execution Mode:** 100% Offline Local CPU Inference
-* **Host OS:** Microsoft Windows 11 Enterprise (64-bit)
+### 8.1 Hardware Environment
+* **Processor:** AMD Ryzen 7 250 w/ Radeon 780M Graphics (8 physical cores, 16 logical threads)
+* **System RAM:** 15.3 GB DDR5
+* **GPU Availability:** None (Benchmarked on CPU inference mode for field laptop validation)
+* **Operating System:** Microsoft Windows 11 Enterprise (64-bit, build 26200)
+* **Python Runtime:** Python 3.12.14 64-bit
 
-### 9.2 Measured Benchmarks
-* **Indexed Ground Footprint:** 100 km × 100 km standard Sentinel-2 MGRS Tile (`T43RGM`)
-* **Indexed Semantic Vectors:** 4,802 crops in live FAISS HNSW graph
-* **Full Ingestion Latency:** 363.67 seconds (complete end-to-end pipeline on CPU: extraction, masking, COG conversion, tiling, embedding, and indexing)
-  * *Band Extraction:* 98.2s
-  * *COG Conversion:* 56.8s
-  * *RemoteCLIP ViT-B/32 Inference:* 115.8s (~20.7 crops/second on CPU)
-  * *FAISS Dynamic Vector Insertion:* 0.28s
-* **Semantic Query Latency:** **< 85 ms** (text query encoding + FAISS HNSW top-50 vector search + SQLite spatial metadata join)
-* **Storage Footprint:**
-  * *Cloud-Optimized GeoTIFF:* ~280 MB per 4-band 10m scene (DEFLATE compressed)
-  * *Vector Index:* ~9.8 MB per 4,800 vectors
-  * *SQLite Spatial Catalog:* ~1.4 MB
+### 8.2 Operational Benchmark Metrics
+
+| Metric Category | Parameter | Benchmark Result | Operational Context |
+|---|---|---|---|
+| **Indexed Area** | Single Scene Coverage | **10,000 km²** | Standard Sentinel-2 MGRS Tile (`T43RGM`, 100 km × 100 km) |
+| **Indexed Density** | Tiles / Vectors per Scene | **2,401 crops** | 224×224px surface crops per scene (30% stride) |
+| **Archive Scale** | Total Vectors Indexed | **4,802 vectors** | Live multi-temporal FAISS HNSW graph |
+| **Build Time** | Total End-to-End Ingestion | **363.67 seconds** | Complete uncompressed processing on CPU |
+| | *Band Extraction & Resampling* | 98.23 s | Multi-band GDAL window extraction |
+| | *Native Quality Masking* | 4.66 s | Scene Classification Layer (SCL) filtering |
+| | *RGB Synthesis & COG Conversion* | 88.89 s | True-color assembly & DEFLATE COG pyramid creation |
+| | *Crop Generation* | 54.62 s | 2,401 uniform grid crops with NaN checks |
+| | *RemoteCLIP Inference* | 115.80 s | **~20.7 crops/sec** on 8-core CPU (sub-second on CUDA) |
+| | *FAISS Graph Insertion* | **0.28 seconds** | Dynamic HNSW vector insertion |
+| **Query Latency** | Semantic Text Retrieval | **< 85 ms** | Text encoding + FAISS top-50 kNN + SQLite metadata join |
+| | Image-to-Image ("Find Similar") | **< 45 ms** | Vector search + R-Tree spatial intersection |
+| **Storage Footprint** | Cloud-Optimized GeoTIFF | **~280 MB** | Full 4-band 10m scene with overviews (DEFLATE) |
+| | FAISS Vector Index | **9.8 MB** | 4,802 512-D vectors in HNSW graph |
+| | SQLite Catalog | **1.4 MB** | Relational metadata, R-Tree bounds, and MGRS index |
+
+### 8.3 How to Reproduce Benchmarks
+To regenerate and verify the evaluation report on your local workstation:
+```powershell
+# Run the evaluation reporter against the live catalog and index
+python backend/eval_manifest.py --summary
+```
 
 ---
 
-## 10. Setup Guide
+## 9. Setup & Execution Guide
 
 ### Option A: 1-Click Desktop Launch (Recommended)
-IRIS is pre-compiled as a standalone Windows desktop application:
-1. Double-click **`IRIS`** on your Windows Desktop (or run [`Launch_IRIS.bat`](Launch_IRIS.bat)).
-2. The launcher silently verifies the offline AI backend on `127.0.0.1:8000` and immediately opens the native IRIS desktop application window.
-3. No browser, web server commands, or manual terminal management required.
+IRIS is packaged as a standalone Windows desktop software:
+1. Double-click the **`IRIS`** icon on your **Windows Desktop** (or execute [`Launch_IRIS.bat`](Launch_IRIS.bat)).
+2. The launcher silently checks the offline Python AI backend on `127.0.0.1:8000`, starts it in the background if not already active, and opens the native desktop application window.
+3. No browser, web commands, or manual terminal management required.
 
 ### Option B: Developer Setup (From Source)
-Ensure Python 3.10+ and Node.js 18+ are installed.
+**Prerequisites:** Python 3.10+ and Node.js 18+.
 
 ```bash
 # 1. Clone repository
 git clone https://github.com/25cseb50robindanie/IRIS.git
 cd IRIS
 
-# 2. Setup Python Virtual Environment
+# 2. Configure Python Virtual Environment
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r backend/requirements.txt
 
-# 3. Setup Frontend Dependencies
+# 3. Build Desktop Frontend
 cd frontend
 npm install
 npm run build
@@ -219,12 +270,34 @@ Launch_IRIS.bat
 
 ---
 
-## 11. Demo
+## 10. Visual Demonstration & Screenshots
 
-* **Desktop Application Window:** Clean, neutral intelligence console with native map rendering, dual-pane swipe comparison, and instant natural-language search.
-* **Semantic Retrieval in Action:** Type queries like `"dense industrial facility with storage tanks"` or `"coastal port with maritime berths"` to retrieve matching satellite locations.
-* **Explainable Change Detection:** View physical changes categorized by Appearance, Disappearance, Expansion, and Contraction with color-coded confidence indicators and provenance audit cards.
+The `docs/screenshots/` directory contains visual proof of IRIS operational interfaces:
+
+### System Overview & Map Interface
+The primary analyst interface displaying Cloud-Optimized GeoTIFF tiles rendered on localhost via MapLibre GL, with MGRS coordinates, native zoom controls, and natural language retrieval.
+
+![IRIS System Overview](docs/screenshots/iris_overview.png)
 
 ---
 
-*IRIS — Engineered for Operational Geospatial Intelligence.*
+### Multi-Temporal Change Detection & Swipe Comparison
+Dual-pane split-screen swipe comparison displaying baseline and target acquisitions, with detected physical change blobs categorized by Appearance, Disappearance, Expansion, and Contraction, alongside the 4-term confidence score.
+
+![IRIS Change Detection](docs/screenshots/iris_change_detection.png)
+
+---
+
+## 11. Deep-Dive Documentation & Technical Dossiers
+
+For reviewers, evaluators, and defence technical panels seeking exhaustive architectural, mathematical, or operational details, refer to the following repository dossiers:
+
+* **[Architecture Note (`architecture.md`)](architecture.md)** — The official technical design note: system decomposition, mathematical definitions of all 5 change detection phases, block-PCA/K-Means mechanics, and Architectural Decision Records (ADRs).
+* **[Master Engineering Documentation (`documentation.md`)](documentation.md)** — Comprehensive 13-part systems manual detailing software architecture, mathematical formulations, REST API contracts, database schemas, and operational playbooks.
+* **[Operational & Developer Guidelines (`AGENTS.md`)](AGENTS.md)** — Repository operational manual, module boundaries, security constraints (WAL mode, IPC isolation, 100% offline rule), and developer build order.
+* **[Project Milestones Changelog (`Milestone.md`)](Milestone.md)** — Historical engineering log chronicling achievements and deliverables across all 6 development milestones.
+* **[Evaluation Telemetry Manifest (`backend/data/eval_manifest.json`)](backend/data/eval_manifest.json)** — Raw machine-readable JSON log containing live recorded benchmark timings, hardware specs, and per-stage latency metrics.
+
+---
+
+*IRIS: Intelligent Retrieval & Interpretation System — Engineered for Operational Geospatial Intelligence.*

@@ -1,7 +1,7 @@
 # IRIS: Architecture Note & Systems Design Specification
 **Problem Statement ID: 26227** — *Semantic Retrieval and Multi-Temporal Change Analysis of Satellite Imagery*  
 **Proponent:** Ministry of Defence / Indian Army (DGIS)  
-**System Designation:** IRIS (Intelligent Retrieval & Imagery Surveillance)  
+**System Designation:** IRIS (Intelligent Retrieval & Interpretation System)  
 **Architecture Classification:** Frozen Production Architecture v2.2.7
 
 ---
