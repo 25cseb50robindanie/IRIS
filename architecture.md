@@ -1,4 +1,26 @@
-# Architecture v2.2.7 (frozen) — Semantic Retrieval & Multi-Temporal Change Analysis of Satellite Imagery
+# IRIS: Architecture Note & Systems Design Specification
+**Problem Statement ID: 26227** — *Semantic Retrieval and Multi-Temporal Change Analysis of Satellite Imagery*  
+**Proponent:** Ministry of Defence / Indian Army (DGIS)  
+**System Designation:** IRIS (Intelligent Retrieval & Imagery Surveillance)  
+**Architecture Classification:** Frozen Production Architecture v2.2.7
+
+---
+
+## 1. Architecture Note: Executive Summary & System Requirements
+
+### 1.1 Architectural Context & Purpose
+This **Architecture Note** provides the formal system design, operational rationale, component decomposition, and architectural requirements for **IRIS**, a zero-cloud, 100% offline desktop platform designed to solve SIH Problem Statement 26227.
+
+Earth-observation archives are expanding rapidly with multi-temporal, multi-spectral, and multi-sensor imagery. While conventional geospatial catalogues are effective for searching by rigid metadata (coordinates, dates, sensor IDs), intelligence analysts require the ability to retrieve imagery **by semantic meaning** (natural language and image-to-image queries) and to detect **genuine physical changes** over time while suppressing the severe false-alarm rates typical of naive image differencing.
+
+### 1.2 Core Architectural Requirements (Non-Negotiable)
+1. **Air-Gapped Operational Sovereignty (100% Offline):** No external cloud calls, API keys, telemetry, or remote dependencies. The entire stack (frontend, tile rendering, vector search, foundation models, raster math, change detection) operates strictly on `localhost` (127.0.0.1).
+2. **Explainable Non-Black-Box Change Engine:** Deep-learning end-to-end change detection models are prone to hallucinated changes, lack explainability, and fail defence audit standards. IRIS adopts an interpretable 5-phase pipeline combining physical masking, sub-pixel co-registration, radiometric normalization, block-PCA/K-Means difference clustering, and multi-spectral index directional classification (appearance, disappearance, expansion, contraction).
+3. **Bounded-Memory Streaming Processing:** Field workstations have finite RAM (8–16 GB). Raw satellite scenes (e.g., 100 km × 100 km Sentinel-2 tiles) cannot be loaded uncompressed into memory. All raster processing is strictly windowed and streamed via GDAL/Rasterio with 16–32px overlapping halos to eliminate seam artifacts while maintaining bounded memory consumption.
+4. **Dynamic Incremental Ingestion & Zero-Downtime Indexing:** New acquisitions must be indexed dynamically without locking the system or requiring full index re-computations. Vector embeddings are appended incrementally to a FAISS HNSW graph, paired with SQLite WAL (Write-Ahead Logging) metadata storage.
+5. **Crash Resilience & Atomic Staging:** Desktop tools in field conditions may be terminated mid-computation. IRIS enforces an atomic staging pattern: outputs are written to staging directories and atomically renamed on transaction commit. Interrupted jobs are recovered on startup via an automated reconciliation sweep.
+
+---
 
 ## Project Context
 Built for Smart India Hackathon-style Problem Statement 26227, issued by the Ministry of Defence / Indian Army (DGIS).

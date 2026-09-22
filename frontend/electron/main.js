@@ -2,9 +2,11 @@ const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const path = require('path');
 
 function createWindow() {
+  const iconPath = path.join(__dirname, 'icon.png');
   const win = new BrowserWindow({
     width: 1400,
     height: 900,
+    icon: iconPath,
     webPreferences: {
       // Security: Electron defaults, never override these
       contextIsolation: true,
@@ -14,11 +16,13 @@ function createWindow() {
     },
   });
 
-  // In dev, load the Vite dev server; in production, load the built files
-  if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
-    win.loadURL('http://localhost:5173');
+  const distHtml = path.join(__dirname, '../dist/index.html');
+  const fs = require('fs');
+
+  if (fs.existsSync(distHtml)) {
+    win.loadFile(distHtml);
   } else {
-    win.loadFile(path.join(__dirname, '../dist/index.html'));
+    win.loadURL('http://127.0.0.1:5173');
   }
 }
 

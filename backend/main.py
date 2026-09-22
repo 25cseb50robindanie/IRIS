@@ -45,6 +45,7 @@ from api.attribution import router as attribution_router
 from api.catalog_status import router as catalog_router
 from api.change import router as change_router
 from api.change_export import router as export_router
+from api.dialog import router as dialog_router
 from api.evaluation import router as eval_router
 from api.ingest import router as ingest_router
 from api.pipeline_status import router as pipeline_router
@@ -156,6 +157,7 @@ app.include_router(attribution_router)
 app.include_router(pipeline_router)
 app.include_router(scenes_router)
 app.include_router(watchlist_router)
+app.include_router(dialog_router)
 
 
 @app.get("/health")

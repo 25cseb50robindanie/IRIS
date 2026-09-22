@@ -1,7 +1,7 @@
 {
   "schema": "iris.eval_manifest/1",
-  "generated_at": "2026-09-21T20:31:01+00:00",
-  "last_operation": "query:text_search",
+  "generated_at": "2026-09-22T07:28:12+00:00",
+  "last_operation": "query:find_similar",
   "hardware": {
     "cpu_model": "AMD Ryzen 7 250 w/ Radeon 780M Graphics",
     "cpu_cores_physical": 8,
@@ -139,13 +139,13 @@
     "cogs_bytes": 2781703691,
     "crops_bytes": 483622279,
     "faiss_index_bytes": 11137914,
-    "sqlite_bytes": 55087104,
-    "total_bytes": 3331550988,
-    "total_mb": 3177.21,
+    "sqlite_bytes": 55119872,
+    "total_bytes": 3331583756,
+    "total_mb": 3177.25,
     "cogs_mb": 2652.84,
     "crops_mb": 461.22,
     "faiss_mb": 10.62,
-    "sqlite_mb": 52.54
+    "sqlite_mb": 52.57
   },
   "index": {
     "scenes": 2,
@@ -161,13 +161,13 @@
     "change_candidates": 5000
   },
   "query_latency_ms": {
-    "count": 30,
-    "p50_ms": 502.8,
-    "p95_ms": 2933.0,
-    "p99_ms": 5278.3,
-    "p50": 502.8,
-    "p95": 2933.0,
-    "p99": 5278.3
+    "count": 31,
+    "p50_ms": 508.1,
+    "p95_ms": 3078.9,
+    "p99_ms": 5247.9,
+    "p50": 508.1,
+    "p95": 3078.9,
+    "p99": 5247.9
   },
   "ingestions": [
     {
@@ -274,11 +274,11 @@
   ],
   "queries": {
     "text_search": {
-      "count": 30,
-      "mean_ms": 898.0,
-      "p50_ms": 502.8,
-      "p95_ms": 2933.0,
-      "p99_ms": 5278.3,
+      "count": 31,
+      "mean_ms": 967.2,
+      "p50_ms": 508.1,
+      "p95_ms": 3078.9,
+      "p99_ms": 5247.9,
       "max_ms": 6162.2,
       "samples_ms": [
         3114.4,
@@ -310,16 +310,17 @@
         540.0,
         2310.8,
         780.9,
-        547.5
+        547.5,
+        3043.4
       ],
       "stages_ms": {
         "model_load": {
-          "count": 11,
-          "mean_ms": 219.7,
+          "count": 12,
+          "mean_ms": 415.3,
           "p50_ms": 0.0,
-          "p95_ms": 1208.3,
-          "p99_ms": 2175.0,
-          "max_ms": 2416.7,
+          "p95_ms": 2484.1,
+          "p99_ms": 2549.9,
+          "max_ms": 2566.4,
           "samples_ms": [
             2416.7,
             0.0,
@@ -331,15 +332,16 @@
             0.0,
             0.0,
             0.0,
-            0.0
+            0.0,
+            2566.4
           ]
         },
         "query_encoding": {
-          "count": 11,
-          "mean_ms": 221.1,
-          "p50_ms": 127.0,
-          "p95_ms": 654.5,
-          "p99_ms": 981.5,
+          "count": 12,
+          "mean_ms": 215.2,
+          "p50_ms": 134.4,
+          "p95_ms": 613.6,
+          "p99_ms": 973.3,
           "max_ms": 1063.2,
           "samples_ms": [
             53.8,
@@ -352,14 +354,15 @@
             98.0,
             1063.2,
             141.8,
-            151.2
+            151.2,
+            150.6
           ]
         },
         "faiss_search": {
-          "count": 11,
-          "mean_ms": 12.2,
-          "p50_ms": 11.9,
-          "p95_ms": 21.9,
+          "count": 12,
+          "mean_ms": 12.5,
+          "p50_ms": 12.4,
+          "p95_ms": 21.7,
           "p99_ms": 23.4,
           "max_ms": 23.8,
           "samples_ms": [
@@ -373,15 +376,16 @@
             9.0,
             7.0,
             23.8,
-            20.0
+            20.0,
+            15.8
           ]
         },
         "change_matching": {
-          "count": 11,
-          "mean_ms": 400.7,
-          "p50_ms": 345.2,
-          "p95_ms": 749.2,
-          "p99_ms": 898.7,
+          "count": 12,
+          "mean_ms": 390.9,
+          "p50_ms": 339.6,
+          "p95_ms": 730.6,
+          "p99_ms": 895.0,
           "max_ms": 936.1,
           "samples_ms": [
             214.5,
@@ -394,16 +398,17 @@
             366.3,
             936.1,
             562.4,
-            345.2
+            345.2,
+            284.0
           ]
         },
         "total": {
-          "count": 11,
-          "mean_ms": 915.5,
-          "p50_ms": 547.5,
-          "p95_ms": 2511.0,
-          "p99_ms": 2671.2,
-          "max_ms": 2711.2,
+          "count": 12,
+          "mean_ms": 1092.8,
+          "p50_ms": 558.8,
+          "p95_ms": 2860.7,
+          "p99_ms": 3006.9,
+          "max_ms": 3043.4,
           "samples_ms": [
             2711.2,
             706.9,
@@ -415,17 +420,18 @@
             540.0,
             2310.8,
             780.9,
-            547.5
+            547.5,
+            3043.4
           ]
         }
       }
     },
     "find_similar": {
-      "count": 20,
-      "mean_ms": 126.2,
-      "p50_ms": 47.5,
-      "p95_ms": 668.6,
-      "p99_ms": 682.6,
+      "count": 21,
+      "mean_ms": 145.5,
+      "p50_ms": 48.8,
+      "p95_ms": 667.7,
+      "p99_ms": 682.4,
       "max_ms": 686.1,
       "samples_ms": [
         320.5,
@@ -447,55 +453,60 @@
         667.7,
         686.1,
         42.4,
-        64.2
+        64.2,
+        532.4
       ],
       "stages_ms": {
         "vector_lookup": {
-          "count": 2,
-          "mean_ms": 0.3,
-          "p50_ms": 0.3,
+          "count": 3,
+          "mean_ms": 0.2,
+          "p50_ms": 0.2,
           "p95_ms": 0.4,
           "p99_ms": 0.4,
           "max_ms": 0.4,
           "samples_ms": [
             0.4,
-            0.2
+            0.2,
+            0.1
           ]
         },
         "faiss_search": {
-          "count": 2,
-          "mean_ms": 5.6,
-          "p50_ms": 5.6,
-          "p95_ms": 10.2,
+          "count": 3,
+          "mean_ms": 5.3,
+          "p50_ms": 4.7,
+          "p95_ms": 10.1,
           "p99_ms": 10.6,
           "max_ms": 10.7,
           "samples_ms": [
             0.6,
-            10.7
+            10.7,
+            4.7
           ]
         },
         "change_matching": {
-          "count": 2,
-          "mean_ms": 0.0,
+          "count": 3,
+          "mean_ms": 158.8,
           "p50_ms": 0.0,
-          "p95_ms": 0.0,
-          "p99_ms": 0.0,
-          "max_ms": 0.0,
+          "p95_ms": 428.7,
+          "p99_ms": 466.8,
+          "max_ms": 476.3,
           "samples_ms": [
             0.0,
-            0.0
+            0.0,
+            476.3
           ]
         },
         "total": {
-          "count": 2,
-          "mean_ms": 53.3,
-          "p50_ms": 53.3,
-          "p95_ms": 63.1,
-          "p99_ms": 64.0,
-          "max_ms": 64.2,
+          "count": 3,
+          "mean_ms": 213.0,
+          "p50_ms": 64.2,
+          "p95_ms": 485.6,
+          "p99_ms": 523.0,
+          "max_ms": 532.4,
           "samples_ms": [
             42.4,
-            64.2
+            64.2,
+            532.4
           ]
         }
       }

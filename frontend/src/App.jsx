@@ -11,6 +11,7 @@ import useAblation from "./useAblation";
 import useWatchlist from "./useWatchlist";
 import Toaster from "./components/Toaster";
 import MapContextMenu from "./components/MapContextMenu";
+import ImportPathModal from "./components/ImportPathModal";
 import { downloadFromApi } from "./download";
 
 const EMBED_TERMINAL_STATES = new Set(["ready", "failed", "not_embedded"]);
@@ -143,18 +144,12 @@ export default function App() {
   const scenesRef = useRef([]);
   scenesRef.current = scenes;
 
-  const handleBrowse = async () => {
+  // Paste-path modal for browser dev mode, where there is no native dialog to fall back to: { mode: 'file' | 'folder' } | null
+  const [pasteModal, setPasteModal] = useState(null);
+
+  const ingestPath = async (selectedPath) => {
+    if (!selectedPath) return;
     try {
-      let selectedPath = null;
-      if (window.iris && typeof window.iris.openFile === "function") {
-        selectedPath = await window.iris.openFile();
-      } else {
-        // Fallback for browser dev mode
-        selectedPath = prompt("Enter the full path to a satellite image (GeoTIFF / JP2) or a Sentinel-2 .SAFE folder:");
-      }
-
-      if (!selectedPath) return;
-
       const fileName = selectedPath.split(/[\/\\]/).pop();
       setIngestState({ status: "ingesting", fileName });
       setWorkspaceTab("overview"); // where the import's steps are shown
@@ -189,6 +184,56 @@ export default function App() {
       notify({ kind: "error", title: "Import failed", message: errorText(err, "Failed to ingest image") });
       setIngestState({ status: "error", fileName: "" });
     }
+  };
+
+  // Native dialog in Electron; in browser dev mode, calls the local backend Windows dialog endpoint
+  const handleImportFile = async () => {
+    if (window.iris && typeof window.iris.openFile === "function") {
+      const p = await window.iris.openFile();
+      if (p) ingestPath(p);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/dialog/pick-file`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.path) {
+          ingestPath(data.path);
+          return;
+        }
+        if (data.path === null) return; // User cancelled
+      }
+    } catch {
+      // Backend dialog unreachable, fall back to paste modal
+    }
+    setPasteModal({ mode: "file" });
+  };
+
+  const handleImportFolder = async () => {
+    if (window.iris && typeof window.iris.openFolder === "function") {
+      const p = await window.iris.openFolder();
+      if (p) ingestPath(p);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/dialog/pick-folder`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.path) {
+          ingestPath(data.path);
+          return;
+        }
+        if (data.path === null) return; // User cancelled
+      }
+    } catch {
+      // Backend dialog unreachable, fall back to paste modal
+    }
+    setPasteModal({ mode: "folder" });
+  };
+
+  const submitPastePath = (path) => {
+    setPasteModal(null);
+    ingestPath(path);
   };
 
   const refreshCatalog = useCallback(async () => {
@@ -825,7 +870,8 @@ export default function App() {
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-qgis-bg">
       {/* 1. Top Toolbar */}
       <Toolbar
-        onBrowse={handleBrowse}
+        onImportFile={handleImportFile}
+        onImportFolder={handleImportFolder}
         isIngesting={ingestState.status === "ingesting"}
         onZoomIn={() => mapRef.current?.zoomIn()}
         onZoomOut={() => mapRef.current?.zoomOut()}
@@ -938,6 +984,28 @@ export default function App() {
       />
 
       <Toaster toasts={toasts} onDismiss={dismissToast} />
+
+      {pasteModal && (
+        <ImportPathModal
+          mode={pasteModal.mode}
+          onCancel={() => setPasteModal(null)}
+          onSubmit={submitPastePath}
+          onBrowse={async () => {
+            const endpoint = pasteModal.mode === "folder" ? "/api/dialog/pick-folder" : "/api/dialog/pick-file";
+            try {
+              const res = await fetch(`${API_BASE}${endpoint}`, { method: "POST" });
+              if (res.ok) {
+                const data = await res.json();
+                return data.path;
+              }
+            } catch {
+              // ignore
+            }
+            return null;
+          }}
+          busy={ingestState.status === "ingesting"}
+        />
+      )}
 
       {/* 4. Bottom Status Bar */}
       <StatusBar
