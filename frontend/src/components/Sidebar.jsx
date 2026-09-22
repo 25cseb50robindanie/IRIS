@@ -104,6 +104,7 @@ export default function Sidebar({
   onChangeView,
   selectedChangeId = null,
   onOpenChange,
+  onClearSearch = null,
   ablation = null,
   onNotify = null,
   searchScope = null, // {all, label}: what the last search covered
@@ -225,6 +226,8 @@ export default function Sidebar({
             similarChanges={similarChanges}
             onFindSimilar={onFindSimilar}
             onOpenChange={onOpenChange}
+            selectedChangeId={selectedChangeId}
+            onClearSearch={onClearSearch}
             attribution={attribution}
             scopeLabel={searchScope?.label}
           />
@@ -244,6 +247,7 @@ export default function Sidebar({
             onFindSimilar={onFindSimilar}
             ablation={ablation}
             onNotify={onNotify}
+            onClearSearch={onClearSearch}
           />
         )}
       </div>

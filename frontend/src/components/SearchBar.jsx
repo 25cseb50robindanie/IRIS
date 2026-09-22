@@ -1,17 +1,31 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Search, Loader2, X, Layers } from "lucide-react";
 
 const SUGGESTIONS = [
   "structures near river",
-  "dense forest and vegetation",
-  "airport runway and aircraft",
+  "airports",
+  "big roads and highways",
   "urban buildings and roads",
 ];
 
 // disabledReason: when set, the whole bar is greyed out and the reason replaces the placeholder
-export default function SearchBar({ onSearch, isSearching, disabledReason = null, searchAllScenes = false, onScopeChange = null, sceneLabel = null }) {
-  const [query, setQuery] = useState("");
+export default function SearchBar({
+  onSearch,
+  onClear = null,
+  isSearching = false,
+  disabledReason = null,
+  searchAllScenes = false,
+  onScopeChange = null,
+  sceneLabel = null,
+  activeQuery = "",
+  hasActiveSearch = false,
+}) {
+  const [query, setQuery] = useState(activeQuery);
   const inactive = Boolean(disabledReason) || isSearching;
+
+  useEffect(() => {
+    setQuery(activeQuery || "");
+  }, [activeQuery]);
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -24,6 +38,13 @@ export default function SearchBar({ onSearch, isSearching, disabledReason = null
   const handleSuggestion = (text) => {
     setQuery(text);
     onSearch(text);
+  };
+
+  const handleClear = () => {
+    setQuery("");
+    if (onClear) {
+      onClear();
+    }
   };
 
   return (
@@ -39,16 +60,16 @@ export default function SearchBar({ onSearch, isSearching, disabledReason = null
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             disabled={inactive}
-            placeholder={disabledReason || "Search imagery by meaning, e.g. dense forest"}
+            placeholder={disabledReason || "Search imagery by meaning, e.g. airports or big roads"}
             title={disabledReason || undefined}
             className="w-full h-7 pl-7 pr-7 bg-white border border-qgis-border rounded-[3px] text-[13px] text-qgis-text placeholder-neutral-400 focus:outline-none focus:border-neutral-500 disabled:bg-neutral-100 disabled:text-neutral-400 disabled:cursor-not-allowed"
           />
 
-          {query && !isSearching && (
+          {(query || hasActiveSearch) && !isSearching && (
             <button
               type="button"
-              onClick={() => setQuery("")}
-              title="Clear"
+              onClick={handleClear}
+              title="Clear search"
               className="absolute right-1.5 p-0.5 text-neutral-400 hover:text-neutral-600"
             >
               <X className="w-3 h-3" />
@@ -63,6 +84,17 @@ export default function SearchBar({ onSearch, isSearching, disabledReason = null
         >
           Search
         </button>
+
+        {(hasActiveSearch || query) && !inactive && onClear && (
+          <button
+            type="button"
+            onClick={handleClear}
+            title="Clear search and show all baseline data"
+            className="h-7 px-2 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 border border-qgis-border rounded-[3px] text-xs font-medium transition-colors shrink-0"
+          >
+            Clear
+          </button>
+        )}
       </form>
 
       {onScopeChange && (

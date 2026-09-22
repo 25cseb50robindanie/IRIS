@@ -376,7 +376,7 @@ export default function App() {
   // source: where the click came from. A click on a card in the Changes list is already there; a click anywhere else
   // (the map, Find Similar's list) brings the analyst to that card in the Changes tab.
   const openChange = async (id, source = "list") => {
-    if (source !== "list") {
+    if (source !== "list" && source !== "similar") {
       setWorkspaceTab("changes");
       setScrollTarget({ id, n: Date.now() });
     }
@@ -385,7 +385,11 @@ export default function App() {
     setChangeError(null);
     setChangeLoading(true);
     try {
-      setChangeDetail(await loadChangeDetail(id));
+      const detail = await loadChangeDetail(id);
+      setChangeDetail(detail);
+      if (detail?.bounds && mapRef.current?.flyToBounds) {
+        mapRef.current.flyToBounds(detail.bounds);
+      }
     } catch (err) {
       setChangeError(errorText(err, "Could not load candidate"));
       notify({ kind: "error", title: "Could not open the change", message: errorText(err, "Could not load candidate") });
@@ -498,10 +502,11 @@ export default function App() {
     setEmbedStatus(null); // the status poll for the new scene fills this in
   };
 
-  // Search results are a snapshot of one scene at one moment; when the scene on the map changes they no longer apply
+  // Reset search and filters to baseline state (as when the app first loaded with no query)
   const resetSearch = () => {
     setSearchState((prev) => ({
       ...prev,
+      query: "",
       results: [],
       changeResults: [],
       changeStatus: null,
@@ -510,9 +515,14 @@ export default function App() {
       selectedResult: null,
       similarTo: null,
       similarChanges: [],
+      error: null,
     }));
+    setAttribution(null);
+    setChangeFilters(DEFAULT_FILTERS);
     setChangeView("all");
-    setWorkspaceTab((tab) => (tab === "search" ? "overview" : tab)); // the results it showed no longer exist
+    setSelectedChangeId(null);
+    setChangeDetail(null);
+    setWorkspaceTab((tab) => (tab === "search" ? (changes.candidates.length > 0 ? "changes" : "overview") : tab));
   };
 
   // Toolbar: switch the map to another imported scene
@@ -843,10 +853,20 @@ export default function App() {
     setAblationOn((on) => !on);
   };
 
-  // Outlines on the map while the Changes tab is open: amber for the full pipeline (click one to open it), red for the
+  // Outlines on the map: amber for the full pipeline/similar changes (click one to open it), red for the
   // raw detections with suppression off
   const searchViewActive = changeView === "search" && searchState.hasSearched;
   const outlines = useMemo(() => {
+    if (workspaceTab === "search") {
+      if (searchState.similarChanges.length > 0) {
+        return {
+          kind: "normal",
+          selectedId: selectedChangeId,
+          items: searchState.similarChanges.map((c) => ({ id: c.candidate_id, bounds: c.bounds })),
+        };
+      }
+      return null;
+    }
     if (workspaceTab !== "changes") return null;
     if (ablationOn) {
       if (!ablationData.list) return null;
@@ -858,7 +878,17 @@ export default function App() {
     }
     const shown = searchViewActive ? applyMatchFilters(searchState.changeResults, changeFilters) : changes.candidates;
     return { kind: "normal", selectedId: selectedChangeId, items: shown.map((c) => ({ id: c.candidate_id, bounds: c.bounds })) };
-  }, [workspaceTab, ablationOn, ablationData.list, searchViewActive, searchState.changeResults, changeFilters, changes.candidates, selectedChangeId]);
+  }, [
+    workspaceTab,
+    ablationOn,
+    ablationData.list,
+    searchViewActive,
+    searchState.changeResults,
+    searchState.similarChanges,
+    changeFilters,
+    changes.candidates,
+    selectedChangeId,
+  ]);
 
   const changeSearchScope = (all) => {
     setSearchAllScenes(all);
@@ -893,7 +923,7 @@ export default function App() {
             selectedResult={searchState.selectedResult}
             onMouseMove={setMousePos}
             changeOutlines={outlines}
-            onOutlineClick={ablationOn ? null : (id) => openChange(id, "map")}
+            onOutlineClick={ablationOn ? null : (id) => openChange(id, workspaceTab === "search" ? "similar" : "map")}
             attribution={attribution}
             onBackgroundClick={() => setAttribution(null)}
             watchlist={watch.locations}
@@ -962,6 +992,7 @@ export default function App() {
           onChangeView={changeViewTo}
           selectedChangeId={selectedChangeId}
           onOpenChange={openChange}
+          onClearSearch={resetSearch}
           ablation={{
             on: ablationOn,
             onToggle: toggleAblation,
@@ -976,11 +1007,14 @@ export default function App() {
       {/* 3. Semantic Search Bar (above status bar) */}
       <SearchBar
         onSearch={handleSearch}
+        onClear={resetSearch}
         isSearching={searchState.isSearching}
         disabledReason={searchDisabledReason}
         searchAllScenes={searchAllScenes}
         onScopeChange={changeSearchScope}
         sceneLabel={currentScene ? `${currentScene.acquisition_date} · ${currentScene.sensor}` : null}
+        activeQuery={searchState.query}
+        hasActiveSearch={searchState.hasSearched || Boolean(searchState.similarTo) || Boolean(searchState.query)}
       />
 
       <Toaster toasts={toasts} onDismiss={dismissToast} />

@@ -4,7 +4,7 @@ import { boundsMgrs, spacedMgrs } from "../mgrs";
 import { changeLabel, DIRECTION_ICONS, directionLabel, hectares } from "./changeKinds";
 
 /** Other changes whose after-date imagery looks like the change Find Similar started from. */
-function SimilarChanges({ changes, onOpenChange }) {
+function SimilarChanges({ changes, onOpenChange, selectedChangeId = null }) {
   if (!changes.length) return null;
   return (
     <div className="mb-3" data-testid="similar-changes">
@@ -13,6 +13,7 @@ function SimilarChanges({ changes, onOpenChange }) {
         {changes.map((c, idx) => {
           const Icon = DIRECTION_ICONS[c.direction || "unclassified"];
           const mgrsRef = c.mgrs || boundsMgrs(c.bounds);
+          const isSelected = selectedChangeId === c.candidate_id;
           const open = () => onOpenChange && onOpenChange(c.candidate_id, "similar");
           return (
             <div
@@ -28,7 +29,11 @@ function SimilarChanges({ changes, onOpenChange }) {
               }}
               data-testid="similar-change-card"
               data-candidate-id={c.candidate_id}
-              className="p-2 rounded-[3px] border border-neutral-200 bg-white hover:border-neutral-300 hover:bg-neutral-50/80 cursor-pointer"
+              className={`p-2 rounded-[3px] border transition-all cursor-pointer ${
+                isSelected
+                  ? "bg-amber-50/90 border-amber-400 ring-1 ring-amber-400 shadow-sm"
+                  : "border-neutral-200 bg-white hover:border-neutral-300 hover:bg-neutral-50/80"
+              }`}
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-1.5 min-w-0">
@@ -72,6 +77,8 @@ export default function SearchTab({
   similarChanges = [],
   onFindSimilar,
   onOpenChange,
+  selectedChangeId = null,
+  onClearSearch = null,
   attribution = null, // {enabled, onToggle}: the heatmap of where in the tile the query matched
   scopeLabel = null, // "active scene" / "all scenes": what the query was run against
 }) {
@@ -91,19 +98,31 @@ export default function SearchTab({
         </div>
       )}
 
-      {!isSearching && results.length > 0 && (
+      {!isSearching && (results.length > 0 || similarChanges.length > 0) && (
         <div className="space-y-2">
-          {similarTo ? (
-            <div className="text-[11px] text-neutral-700 font-sans font-medium truncate" title={similarTo.label} data-testid="similar-label">
-              {similarTo.label}
-            </div>
-          ) : (
-            <div className="text-[11px] text-neutral-500 font-sans italic truncate" title={query} data-testid="query-label">
-              Query: "{query}"{scopeLabel ? ` · ${scopeLabel}` : ""}
-            </div>
-          )}
+          <div className="flex items-center justify-between">
+            {similarTo ? (
+              <div className="text-[11px] text-neutral-700 font-sans font-medium truncate" title={similarTo.label} data-testid="similar-label">
+                {similarTo.label}
+              </div>
+            ) : (
+              <div className="text-[11px] text-neutral-500 font-sans italic truncate" title={query} data-testid="query-label">
+                Query: "{query}"{scopeLabel ? ` · ${scopeLabel}` : ""}
+              </div>
+            )}
+            {onClearSearch && (
+              <button
+                type="button"
+                onClick={onClearSearch}
+                title="Clear search and show all baseline data"
+                className="text-[10px] text-neutral-500 hover:text-neutral-800 underline shrink-0 ml-2"
+              >
+                Clear Search
+              </button>
+            )}
+          </div>
 
-          <SimilarChanges changes={similarChanges} onOpenChange={onOpenChange} />
+          <SimilarChanges changes={similarChanges} onOpenChange={onOpenChange} selectedChangeId={selectedChangeId} />
           {similarTo && <div className="text-[10px] uppercase font-semibold text-neutral-400">Similar tiles</div>}
 
           <div className="space-y-1.5">
@@ -223,7 +242,7 @@ export default function SearchTab({
         </div>
       )}
 
-      {!isSearching && !searchError && results.length === 0 && (
+      {!isSearching && !searchError && results.length === 0 && similarChanges.length === 0 && (
         <div className="border border-dashed border-neutral-200 rounded-[3px] p-3 text-center text-neutral-400">
           <Search className="w-4 h-4 mx-auto mb-1 text-neutral-300" />
           <p className="text-xs">No active search results.</p>

@@ -141,7 +141,7 @@ function PairChips({ pairs, selectedJobId, onSelect }) {
   );
 }
 
-function ChangeFilters({ filters, onChange, showMatchSort }) {
+function ChangeFilters({ filters, onChange, showMatchSort, onResetFilters }) {
   // At least one box of each group stays ticked: an empty group would be an empty list with no explanation
   const setGroup = (group, key, on) => {
     const next = { ...filters[group], [key]: on };
@@ -152,21 +152,41 @@ function ChangeFilters({ filters, onChange, showMatchSort }) {
     ["types", "Type", TYPE_OPTIONS],
     ["directions", "Direction", DIRECTION_OPTIONS],
   ];
+  const isModified =
+    filters.minConfidence !== DEFAULT_FILTERS.minConfidence ||
+    filters.hideSeasonal !== DEFAULT_FILTERS.hideSeasonal ||
+    (showMatchSort ? filters.sort !== "match" : filters.sort !== DEFAULT_FILTERS.sort) ||
+    Object.keys(DEFAULT_FILTERS.types).some((k) => filters.types[k] !== DEFAULT_FILTERS.types[k]) ||
+    Object.keys(DEFAULT_FILTERS.directions).some((k) => filters.directions[k] !== DEFAULT_FILTERS.directions[k]) ||
+    filters.jobId != null;
+
   return (
     <div className="mb-2 p-2 border border-neutral-200 rounded-[3px] bg-neutral-50 space-y-1.5 text-[11px] text-neutral-700">
-      <label className="flex items-center space-x-2">
-        <span className="w-24 shrink-0">Confidence ≥ {filters.minConfidence.toFixed(2)}</span>
-        <input
-          type="range"
-          min="0"
-          max="1"
-          step="0.05"
-          value={filters.minConfidence}
-          onChange={(e) => onChange({ ...filters, minConfidence: parseFloat(e.target.value) })}
-          className="flex-1 accent-neutral-700"
-          aria-label="Minimum confidence"
-        />
-      </label>
+      <div className="flex items-center justify-between">
+        <label className="flex items-center space-x-2 flex-1">
+          <span className="w-24 shrink-0">Confidence ≥ {filters.minConfidence.toFixed(2)}</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={filters.minConfidence}
+            onChange={(e) => onChange({ ...filters, minConfidence: parseFloat(e.target.value) })}
+            className="flex-1 accent-neutral-700"
+            aria-label="Minimum confidence"
+          />
+        </label>
+        {isModified && (
+          <button
+            type="button"
+            onClick={() => (onResetFilters ? onResetFilters() : onChange(DEFAULT_FILTERS))}
+            title="Reset filters to default"
+            className="text-[10px] text-neutral-500 hover:text-neutral-800 underline ml-2 shrink-0"
+          >
+            Reset
+          </button>
+        )}
+      </div>
       {groups.map(([group, title, options]) => (
         <div key={group} className="flex flex-wrap gap-x-3 gap-y-0.5" role="group" aria-label={`${title} filter`}>
           <span className="w-full text-[10px] uppercase font-semibold text-neutral-400">{title}</span>
@@ -546,6 +566,7 @@ export default function ChangeResults({
   onFindSimilar,
   ablation = null, // {on, onToggle, available, stats, list, error}
   onNotify = null,
+  onClearSearch = null,
 }) {
   const pairs = changes?.pairs || [];
   const inSearch = view === "search" && search?.hasSearched;
@@ -655,8 +676,19 @@ export default function ChangeResults({
       ) : (
         <>
           {inSearch && (
-            <div className="mb-2 text-[11px] text-neutral-500 italic truncate" title={search.query}>
-              Changes matching "{search.query}"
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-[11px] text-neutral-500 italic truncate" title={search.query}>
+                Changes matching "{search.query}"
+              </div>
+              {onClearSearch && (
+                <button
+                  type="button"
+                  onClick={onClearSearch}
+                  className="text-[10px] text-neutral-600 hover:text-neutral-900 underline ml-2 shrink-0"
+                >
+                  Clear search & show all
+                </button>
+              )}
             </div>
           )}
 
@@ -678,13 +710,29 @@ export default function ChangeResults({
           {inSearch && search.status === "no_match" && (
             <>
               <Note>Changes were detected in this area, but none match "{search.query}".</Note>
-              <LinkButton onClick={() => onViewChange("all")}>Show all {search.meta.total_candidates} detected changes</LinkButton>
+              <div className="space-y-1 mt-1">
+                <LinkButton onClick={() => onViewChange("all")}>Show all {search.meta.total_candidates} detected changes</LinkButton>
+                {onClearSearch && (
+                  <button
+                    type="button"
+                    onClick={onClearSearch}
+                    className="block text-[11px] text-neutral-500 hover:text-neutral-800 underline"
+                  >
+                    Clear search & reset filters
+                  </button>
+                )}
+              </div>
             </>
           )}
 
           {showBrowse && (
             <>
-              <ChangeFilters filters={filters} onChange={onFiltersChange} showMatchSort={inSearch} />
+              <ChangeFilters
+                filters={filters}
+                onChange={onFiltersChange}
+                showMatchSort={inSearch}
+                onResetFilters={() => onFiltersChange(DEFAULT_FILTERS)}
+              />
               <div className="mb-1.5 text-[11px] text-neutral-500 font-mono" data-testid="change-count">
                 {label}
               </div>
@@ -705,7 +753,20 @@ export default function ChangeResults({
               ) : (
                 <Note>No candidates pass the current filters.</Note>
               )}
-              {inSearch && <LinkButton onClick={() => onViewChange("all")}>Show all detected changes in this area</LinkButton>}
+              {inSearch && (
+                <div className="mt-2 space-y-1">
+                  <LinkButton onClick={() => onViewChange("all")}>Show all detected changes in this area</LinkButton>
+                  {onClearSearch && (
+                    <button
+                      type="button"
+                      onClick={onClearSearch}
+                      className="block text-[11px] text-neutral-500 hover:text-neutral-800 underline"
+                    >
+                      Clear search & reset filters
+                    </button>
+                  )}
+                </div>
+              )}
             </>
           )}
 
