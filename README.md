@@ -1,4 +1,4 @@
-# IRIS: Intelligent Retrieval & Imagery Surveillance
+# IRIS: Intelligent Retrieval & Interpretation System
 
 > **Offline Desktop System for Semantic Retrieval and Multi-Temporal Change Analysis of Satellite Imagery**  
 > *Developed for Smart India Hackathon (SIH) — Problem Statement ID: 26227*  
@@ -12,6 +12,9 @@
 * **Title:** Semantic Retrieval and Multi-Temporal Change Analysis of Satellite Imagery
 * **Category:** Software / National Security / Geospatial Intelligence
 * **Proponent:** Ministry of Defence / Indian Army (DGIS)
+* **Team ID:** 151016
+* **Team Name:** MIND SPARK
+
 
 ### Background & Operational Challenge
 Earth-observation archives are expanding exponentially with multi-temporal, multi-spectral, and multi-sensor acquisitions from constellations such as Sentinel, Landsat, and Bhuvan. Conventional military and defense geospatial catalogues are indexed strictly by static metadata—coordinates, bounding boxes, acquisition dates, sensor models, and product levels. While effective when the analyst already knows *where* and *when* an event occurred, analysts cannot query archives by **semantic meaning** (e.g., *"new forward airstrip construction in arid terrain"* or *"floating pontoon bridge deployment along river corridor"*).
